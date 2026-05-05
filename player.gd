@@ -1,7 +1,9 @@
 extends CharacterBody3D
 
 @export var speed := 6.0
+@export var sprint_speed := 10.0
 @export var crouch_speed := 3.0
+
 @export var jump_velocity := 4.5
 @export var mouse_sensitivity := 0.002
 @export var crouch_lerp_speed := 10.0
@@ -11,8 +13,9 @@ extends CharacterBody3D
 @onready var collision: CollisionShape3D = $CollisionShape3D
 
 var pitch := 0.0
-var is_crouching := false
 
+var is_crouching := false
+var is_sprinting := false
 var was_on_floor := true
 
 var stand_height := 2.0
@@ -34,6 +37,7 @@ func _ready() -> void:
 		stand_height = shape.height
 
 	stand_collision_pos = collision.position
+
 	stand_cam_y = camera.position.y
 	crouch_cam_y = stand_cam_y - 0.8
 
@@ -53,9 +57,21 @@ func _unhandled_input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 	handle_crouch(delta)
 
-	# --- landing detection (basic hook) ---
+	# -------------------------
+	# TOGGLES
+	# -------------------------
+	if Input.is_action_just_pressed("sprint"):
+		is_sprinting = !is_sprinting
+
+	if Input.is_action_just_pressed("crouch") and is_on_floor():
+		is_crouching = !is_crouching
+
+	# ceiling safety
+	if not is_crouching and not can_stand_up():
+		is_crouching = true
+
+	# landing hook (optional)
 	if not was_on_floor and is_on_floor():
-		# You can add sound, camera shake, etc here later
 		pass
 
 	was_on_floor = is_on_floor()
@@ -63,7 +79,9 @@ func _physics_process(delta: float) -> void:
 	if not is_on_floor():
 		velocity += get_gravity() * delta
 
-	# --- jump (crouch unaffected) ---
+	# -------------------------
+	# JUMP
+	# -------------------------
 	if Input.is_action_just_pressed("jump") and is_on_floor():
 		velocity.y = jump_velocity
 
@@ -76,8 +94,19 @@ func _physics_process(delta: float) -> void:
 
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
-	var current_speed = crouch_speed if is_crouching else speed
+	# -------------------------
+	# SPEED LOGIC (NOW SUPPORTS CROUCH + SPRINT TOGETHER)
+	# -------------------------
+	var current_speed = speed
 
+	if is_crouching:
+		current_speed = crouch_speed
+		if is_sprinting:
+			current_speed += 2.0  # sprint boost while crouched
+	elif is_sprinting and is_on_floor():
+		current_speed = sprint_speed
+
+	# movement
 	if direction:
 		velocity.x = direction.x * current_speed
 		velocity.z = direction.z * current_speed
@@ -105,35 +134,17 @@ func can_stand_up() -> bool:
 
 
 # -------------------------
-# CROUCH SYSTEM (TOGGLE + SMOOTH)
+# CROUCH SYSTEM (SMOOTH)
 # -------------------------
 func handle_crouch(delta: float) -> void:
 	var shape = collision.shape as CapsuleShape3D
 	if not shape:
 		return
 
-	# --- toggle crouch ---
-	if Input.is_action_just_pressed("crouch") and is_on_floor():
-		if is_crouching:
-			if can_stand_up():
-				is_crouching = false
-		else:
-			is_crouching = true
-
-	# --- safety: block standing under ceilings ---
-	if not is_crouching and not can_stand_up():
-		is_crouching = true
-
-	# --- targets ---
 	var target_height = crouch_height if is_crouching else stand_height
 	var target_cam_y = crouch_cam_y if is_crouching else stand_cam_y
 	var target_collision_y = -0.5 if is_crouching else 0.0
 
-	# --- smooth capsule ---
 	shape.height = lerp(shape.height, target_height, crouch_lerp_speed * delta)
-
-	# --- smooth collider offset ---
 	collision.position.y = lerp(collision.position.y, target_collision_y, crouch_lerp_speed * delta)
-
-	# --- smooth camera ---
 	camera.position.y = lerp(camera.position.y, target_cam_y, crouch_lerp_speed * delta)

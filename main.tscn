@@ -89,3 +89,16 @@ light_specular = 1.75
 transform = Transform3D(0.99921554, 0.03273302, 0.02228873, 0.021402905, 0.027167032, -0.99940175, -0.03331896, 0.9990948, 0.02644514, 0, 24.979078, 0)
 light_color = Color(0.19434929, 0.19434926, 0.19434926, 1)
 light_energy = 2.822
+
+[node name="wall2" type="MeshInstance3D" parent="." unique_id=2127589073]
+transform = Transform3D(8.517738, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.1822028, -7.923192)
+material_override = SubResource("StandardMaterial3D_h2yge")
+material_overlay = SubResource("ShaderMaterial_1bvp3")
+mesh = SubResource("BoxMesh_ig7tw")
+
+[node name="StaticBody3D" type="StaticBody3D" parent="wall2" unique_id=1714799236]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="wall2/StaticBody3D" unique_id=846682947]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.0024300218, -0.0007583499, -0.0021414757)
+shape = SubResource("BoxShape3D_0xm2m")
+debug_color = Color(0.99595994, 0.9918212, 0.9971054, 1)
