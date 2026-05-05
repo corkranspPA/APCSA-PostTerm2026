@@ -55,7 +55,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 [node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=1413065017]
 current = true
 
-[node name="DirectionalLight3D2" type="DirectionalLight3D" parent="." unique_id=422222544]
+[node name="sun" type="DirectionalLight3D" parent="." unique_id=422222544]
 transform = Transform3D(0.8222533, -0.24395478, 0.51418436, 7.28882e-09, 0.90346986, 0.4286513, -0.5691216, -0.35245994, 0.7428812, 0.20638585, 26.892277, 27.424915)
 light_energy = 0.653
 light_indirect_energy = 1.96
@@ -77,7 +77,10 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.0024300218, -0.0007583499,
 shape = SubResource("BoxShape3D_0xm2m")
 debug_color = Color(0.99595994, 0.9918212, 0.9971054, 1)
 
-[node name="DirectionalLight3D3" type="DirectionalLight3D" parent="." unique_id=1863287790]
+[node name="lightMakeObjectVis" type="DirectionalLight3D" parent="." unique_id=1863287790]
 transform = Transform3D(-0.94574565, -4.1135095e-10, 0.32490793, -0.32264185, 0.11790138, -0.9391494, -0.03830709, -0.99302554, -0.11150471, 0, 18.405357, -15.2402725)
-light_energy = 0.366
-light_indirect_energy = 0.683
+light_energy = 0.1
+light_indirect_energy = 3.485
+light_volumetric_fog_energy = 3.24
+light_negative = true
+light_specular = 1.75
