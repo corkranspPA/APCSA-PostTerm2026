@@ -84,3 +84,8 @@ light_indirect_energy = 3.485
 light_volumetric_fog_energy = 3.24
 light_negative = true
 light_specular = 1.75
+
+[node name="DirectionalLight3D2" type="DirectionalLight3D" parent="." unique_id=1734477687]
+transform = Transform3D(0.99921554, 0.03273302, 0.02228873, 0.021402905, 0.027167032, -0.99940175, -0.03331896, 0.9990948, 0.02644514, 0, 24.979078, 0)
+light_color = Color(0.19434929, 0.19434926, 0.19434926, 1)
+light_energy = 2.822
