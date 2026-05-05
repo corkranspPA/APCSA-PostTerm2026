@@ -5,6 +5,8 @@ extends CharacterBody3D
 @export var jump_velocity := 4.5
 @export var mouse_sensitivity := 0.002
 
+@export var crouch_lerp_speed := 10.0
+
 @onready var head: Node3D = $Head
 @onready var camera: Camera3D = $Head/Camera3D
 @onready var collision: CollisionShape3D = $CollisionShape3D
@@ -20,18 +22,17 @@ var stand_collision_pos := Vector3.ZERO
 var stand_cam_y := 1.6
 var crouch_cam_y := 0.8
 
+var headspace_check_distance := 0.6
+
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 
-	# store capsule settings
 	var shape = collision.shape as CapsuleShape3D
 	if shape:
 		stand_height = shape.height
 
 	stand_collision_pos = collision.position
-
-	# store real camera height (prevents inverted crouch)
 	stand_cam_y = camera.position.y
 	crouch_cam_y = stand_cam_y - 0.8
 
@@ -49,7 +50,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _physics_process(delta: float) -> void:
-	handle_crouch()
+	handle_crouch(delta)
 
 	if not is_on_floor():
 		velocity += get_gravity() * delta
@@ -78,33 +79,50 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 
 
-func handle_crouch() -> void:
+# -------------------------
+# CEILING CHECK FUNCTION
+# -------------------------
+func can_stand_up() -> bool:
+	var space_state = get_world_3d().direct_space_state
+
+	var query = PhysicsRayQueryParameters3D.create(
+		global_position,
+		global_position + Vector3.UP * headspace_check_distance
+	)
+
+	query.exclude = [self]
+
+	var result = space_state.intersect_ray(query)
+
+	return result.is_empty()
+
+
+# -------------------------
+# CROUCH SYSTEM (SMOOTH)
+# -------------------------
+func handle_crouch(delta: float) -> void:
 	var shape = collision.shape as CapsuleShape3D
 	if not shape:
 		return
 
-	if Input.is_action_pressed("crouch"):
-		if not is_crouching:
-			is_crouching = true
+	var wants_crouch = Input.is_action_pressed("crouch")
 
-			# shrink collider
-			shape.height = crouch_height
+	# prevent standing if ceiling is blocking
+	if not wants_crouch and not can_stand_up():
+		wants_crouch = true
 
-			# keep feet grounded (no floating)
-			collision.position = stand_collision_pos + Vector3(0, -0.5, 0)
+	is_crouching = wants_crouch
 
-		# move camera DOWN relative to real height
-		camera.position.y = crouch_cam_y
+	# target values
+	var target_height = crouch_height if is_crouching else stand_height
+	var target_cam_y = crouch_cam_y if is_crouching else stand_cam_y
+	var target_collision_y = -0.5 if is_crouching else 0.0
 
-	else:
-		if is_crouching:
-			is_crouching = false
+	# smooth capsule height
+	shape.height = lerp(shape.height, target_height, crouch_lerp_speed * delta)
 
-			# restore collider
-			shape.height = stand_height
+	# smooth collision offset (prevents floating)
+	collision.position.y = lerp(collision.position.y, target_collision_y, crouch_lerp_speed * delta)
 
-			# restore exact original position
-			collision.position = stand_collision_pos
-
-		# restore camera correctly
-		camera.position.y = stand_cam_y
+	# smooth camera movement
+	camera.position.y = lerp(camera.position.y, target_cam_y, crouch_lerp_speed * delta)
