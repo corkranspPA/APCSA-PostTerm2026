@@ -76,3 +76,8 @@ mesh = SubResource("BoxMesh_ig7tw")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.0024300218, -0.0007583499, -0.0021414757)
 shape = SubResource("BoxShape3D_0xm2m")
 debug_color = Color(0.99595994, 0.9918212, 0.9971054, 1)
+
+[node name="DirectionalLight3D3" type="DirectionalLight3D" parent="." unique_id=1863287790]
+transform = Transform3D(-0.94574565, -4.1135095e-10, 0.32490793, -0.32264185, 0.11790138, -0.9391494, -0.03830709, -0.99302554, -0.11150471, 0, 18.405357, -15.2402725)
+light_energy = 0.366
+light_indirect_energy = 0.683
