@@ -1,5 +1,7 @@
 [gd_scene format=3 uid="uid://cqow47bch5ocs"]
 
+[ext_resource type="Script" uid="uid://b0gd8hrqpvtbb" path="res://player.gd" id="1_ig7tw"]
+
 [sub_resource type="PlaneMesh" id="PlaneMesh_7dm0k"]
 size = Vector2(40, 40)
 
@@ -25,6 +27,7 @@ shape = SubResource("BoxShape3D_ig7tw")
 
 [node name="Player" type="CharacterBody3D" parent="." unique_id=517313335]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+script = ExtResource("1_ig7tw")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=1497100508]
 shape = SubResource("CapsuleShape3D_0xm2m")
