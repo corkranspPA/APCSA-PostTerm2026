@@ -2,6 +2,9 @@
 
 [ext_resource type="Script" uid="uid://b0gd8hrqpvtbb" path="res://player.gd" id="1_ig7tw"]
 
+[sub_resource type="BoxShape3D" id="BoxShape3D_0xm2m"]
+size = Vector3(1, 1.989502, 2.4863281)
+
 [sub_resource type="PlaneMesh" id="PlaneMesh_7dm0k"]
 size = Vector2(40, 40)
 
@@ -16,7 +19,17 @@ size = Vector3(40, 0.1, 40)
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1345094640]
 
+[node name="wall" type="MeshInstance3D" parent="." unique_id=1979158723]
+
+[node name="StaticBody3D" type="StaticBody3D" parent="wall" unique_id=586450067]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="wall/StaticBody3D" unique_id=1856738121]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0465059, -3.6337562)
+shape = SubResource("BoxShape3D_0xm2m")
+disabled = true
+
 [node name="Ground" type="MeshInstance3D" parent="." unique_id=1511768674]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0075335503, 0.02169919, 0.022922158)
 mesh = SubResource("PlaneMesh_7dm0k")
 
 [node name="StaticBody3D" type="StaticBody3D" parent="Ground" unique_id=964121023]
@@ -37,3 +50,9 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 
 [node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=1413065017]
 current = true
+
+[node name="DirectionalLight3D2" type="DirectionalLight3D" parent="." unique_id=422222544]
+transform = Transform3D(1, 0, 0, 0, 0.90381384, 0.42792585, 0, -0.42792585, 0.90381384, 0.20638585, 6.812191, 9.304912)
+light_color = Color(0.12941177, 0.4, 0.23137255, 1)
+light_energy = 2.0
+shadow_enabled = true
