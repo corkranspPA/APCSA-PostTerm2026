@@ -2,6 +2,10 @@
 
 [ext_resource type="Script" uid="uid://b0gd8hrqpvtbb" path="res://player.gd" id="1_ig7tw"]
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ig7tw"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_0xm2m"]
+
 [sub_resource type="PlaneMesh" id="PlaneMesh_7dm0k"]
 size = Vector2(40, 40)
 
@@ -9,6 +13,10 @@ size = Vector2(40, 40)
 size = Vector3(40, 0.1, 40)
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_0xm2m"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_h2yge"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1bvp3"]
 
 [sub_resource type="BoxMesh" id="BoxMesh_ig7tw"]
 
@@ -24,6 +32,8 @@ shadow_enabled = true
 
 [node name="Ground" type="MeshInstance3D" parent="." unique_id=1511768674]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0075335503, 0.02169919, 0.022922158)
+material_override = SubResource("StandardMaterial3D_ig7tw")
+material_overlay = SubResource("ShaderMaterial_0xm2m")
 mesh = SubResource("PlaneMesh_7dm0k")
 
 [node name="StaticBody3D" type="StaticBody3D" parent="Ground" unique_id=964121023]
@@ -46,17 +56,18 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 current = true
 
 [node name="DirectionalLight3D2" type="DirectionalLight3D" parent="." unique_id=422222544]
-transform = Transform3D(1, 0, 0, 0, 0.75499576, 0.6557297, 0, -0.6557297, 0.75499576, 0.20638585, 26.892277, 9.304912)
-light_color = Color(0.12941177, 0.4, 0.23137255, 1)
-light_energy = 1.683
-light_indirect_energy = 5.99
-light_volumetric_fog_energy = 5.198
+transform = Transform3D(0.8222533, -0.24395478, 0.51418436, 7.28882e-09, 0.90346986, 0.4286513, -0.5691216, -0.35245994, 0.7428812, 0.20638585, 26.892277, 27.424915)
+light_energy = 0.653
+light_indirect_energy = 1.96
+light_volumetric_fog_energy = 3.376
 light_angular_distance = 4.01
 light_specular = 1.713
 shadow_enabled = true
 
 [node name="wall" type="MeshInstance3D" parent="." unique_id=1433370057]
 transform = Transform3D(8.517738, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.1822028, 6.987879)
+material_override = SubResource("StandardMaterial3D_h2yge")
+material_overlay = SubResource("ShaderMaterial_1bvp3")
 mesh = SubResource("BoxMesh_ig7tw")
 
 [node name="StaticBody3D" type="StaticBody3D" parent="wall" unique_id=649202738]
