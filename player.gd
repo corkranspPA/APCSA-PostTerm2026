@@ -9,6 +9,19 @@ extends CharacterBody3D
 @export var crouch_lerp_speed := 10.0
 
 # -------------------------
+# JUMP BOOST SYSTEM (UPDATED)
+# -------------------------
+@export var sprint_jump_boost := 1.35
+
+@export var wall_jump_up_boost := 1.6
+@export var wall_jump_speed_scale := 1.35
+@export var min_wall_jump_up := 5.5
+@export var max_wall_jump_up := 8.0
+
+@export var slide_jump_boost := 1.4
+@export var slide_exit_speed_boost := 1.25
+
+# -------------------------
 # SLIDE SYSTEM
 # -------------------------
 @export var slide_base_speed := 14.0
@@ -129,6 +142,9 @@ func _physics_process(delta: float) -> void:
 		"move_back"
 	)
 
+	# -------------------------
+	# SLIDE START
+	# -------------------------
 	if Input.is_action_just_pressed("crouch") \
 	and is_sprinting \
 	and is_on_floor() \
@@ -143,13 +159,10 @@ func _physics_process(delta: float) -> void:
 	if not is_on_floor():
 		velocity += get_gravity() * delta
 
-	if Input.is_action_just_pressed("jump") and is_on_floor():
-		velocity.y = jump_velocity
-
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
 	# -------------------------
-	# SLIDING
+	# SLIDE MOVEMENT
 	# -------------------------
 	if is_sliding:
 		slide_timer -= delta
@@ -189,7 +202,51 @@ func _physics_process(delta: float) -> void:
 			velocity.z = move_toward(velocity.z, 0, current_speed * 0.2)
 
 	# -------------------------
-	# BUNNY HOP SYSTEM
+	# 🧠 JUMP SYSTEM (UPGRADED)
+	# -------------------------
+	if Input.is_action_just_pressed("jump"):
+
+		# NORMAL + SPRINT + SLIDE JUMP BOOST
+		if is_on_floor():
+			var final_jump := jump_velocity
+
+			if is_sprinting:
+				final_jump *= sprint_jump_boost
+
+			if is_sliding:
+				final_jump *= slide_jump_boost
+
+				# slide exit speed boost
+				var horiz := Vector2(velocity.x, velocity.z)
+				horiz *= slide_exit_speed_boost
+				velocity.x = horiz.x
+				velocity.z = horiz.y
+
+			velocity.y = final_jump
+
+		# 🧠 WALL HOP (ULTRAKILL STYLE BOOSTED)
+		elif is_on_wall():
+			var wall_normal = get_wall_normal()
+
+			# stronger push off wall
+			velocity += wall_normal * wall_jump_speed_scale
+
+			# speed-based vertical boost
+			var horizontal_speed = Vector2(velocity.x, velocity.z).length()
+
+			var up_boost = clamp(
+				horizontal_speed * 0.22 * wall_jump_up_boost,
+				min_wall_jump_up * wall_jump_up_boost,
+				max_wall_jump_up * wall_jump_up_boost
+			)
+
+			velocity.y = up_boost
+
+			# forward carry
+			velocity += -transform.basis.z * wall_jump_speed_scale
+
+	# -------------------------
+	# 🐇 BUNNY HOPPING
 	# -------------------------
 	if is_on_floor():
 		if not was_on_floor:

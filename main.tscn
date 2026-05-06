@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://b0gd8hrqpvtbb" path="res://player.gd" id="1_ig7tw"]
 [ext_resource type="Script" uid="uid://datjo4mngacbo" path="res://day_night_cycle.gd" id="2_0xm2m"]
+[ext_resource type="Texture2D" uid="uid://blg8updhrtu4r" path="res://stone road.jpeg" id="3_h2yge"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
 
@@ -28,16 +29,22 @@ size = Vector3(40, 0.1, 40)
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_0xm2m"]
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_h2yge"]
-
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_1bvp3"]
-
 [sub_resource type="BoxMesh" id="BoxMesh_ig7tw"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_7mycd"]
+albedo_texture = ExtResource("3_h2yge")
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_0xm2m"]
 size = Vector3(0.9897461, 1, 1)
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_h2yge"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1bvp3"]
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1bvp3"]
+albedo_texture = ExtResource("3_h2yge")
+albedo_texture_force_srgb = true
+roughness_texture = ExtResource("3_h2yge")
 
 [sub_resource type="BoxMesh" id="BoxMesh_0xm2m"]
 
@@ -96,10 +103,9 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 current = true
 
 [node name="wall" type="MeshInstance3D" parent="." unique_id=1433370057]
-transform = Transform3D(8.517738, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.1822028, 6.987879)
-material_override = SubResource("StandardMaterial3D_h2yge")
-material_overlay = SubResource("ShaderMaterial_1bvp3")
+transform = Transform3D(8.517738, 0, 0, 0, 4.3503304, 0, 0, 0, 1, 0, 2.1822028, 6.987879)
 mesh = SubResource("BoxMesh_ig7tw")
+surface_material_override/0 = SubResource("StandardMaterial3D_7mycd")
 
 [node name="StaticBody3D" type="StaticBody3D" parent="wall" unique_id=649202738]
 
