@@ -9,7 +9,7 @@ extends CharacterBody3D
 @export var crouch_lerp_speed := 10.0
 
 # -------------------------
-# JUMP BOOST SYSTEM (UPDATED)
+# JUMP BOOST SYSTEM
 # -------------------------
 @export var sprint_jump_boost := 1.35
 
@@ -20,6 +20,18 @@ extends CharacterBody3D
 
 @export var slide_jump_boost := 1.4
 @export var slide_exit_speed_boost := 1.25
+
+# -------------------------
+# DASH SYSTEM (NEW)
+# -------------------------
+@export var dash_speed := 18.0
+@export var dash_duration := 0.15
+@export var dash_cooldown := 0.8
+
+var is_dashing := false
+var dash_timer := 0.0
+var dash_cooldown_timer := 0.0
+var dash_direction := Vector3.ZERO
 
 # -------------------------
 # SLIDE SYSTEM
@@ -39,8 +51,9 @@ var slide_speed := 0.0
 # FOV SYSTEM
 # -------------------------
 @export var normal_fov := 75.0
-@export var sprint_fov := 85.0
+@export var sprint_fov := 100.0
 @export var slide_fov := 105.0
+@export var dash_fov := 95.0
 @export var fov_speed := 7.0
 
 var current_fov := 75.0
@@ -127,6 +140,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _physics_process(delta: float) -> void:
 
+	dash_cooldown_timer = max(dash_cooldown_timer - delta, 0.0)
+
 	if is_sliding:
 		is_crouching = true
 
@@ -142,9 +157,9 @@ func _physics_process(delta: float) -> void:
 		"move_back"
 	)
 
-	# -------------------------
-	# SLIDE START
-	# -------------------------
+	if Input.is_action_just_pressed("dash") and dash_cooldown_timer <= 0.0:
+		start_dash()
+
 	if Input.is_action_just_pressed("crouch") \
 	and is_sprinting \
 	and is_on_floor() \
@@ -161,52 +176,51 @@ func _physics_process(delta: float) -> void:
 
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
-	# -------------------------
-	# SLIDE MOVEMENT
-	# -------------------------
-	if is_sliding:
-		slide_timer -= delta
+	if is_dashing:
+		dash_timer -= delta
+		velocity = dash_direction * dash_speed
 
-		var slope_factor := 1.0
-		if is_on_floor():
-			var n = get_floor_normal()
-			var slope = rad_to_deg(acos(n.dot(Vector3.UP)))
-			if slope > 5.0:
-				slope_factor = 1.0 + (slope / 45.0) * slope_slide_boost
+		if dash_timer <= 0.0:
+			is_dashing = false
 
-		slide_speed -= slide_friction * delta
-		slide_speed = max(slide_speed, 0.0)
-
-		velocity.x = slide_direction.x * slide_speed * slope_factor
-		velocity.z = slide_direction.z * slide_speed * slope_factor
-
-		if slide_timer <= 0.0 or slide_speed < 2.0:
-			stop_slide()
-
-	# -------------------------
-	# NORMAL MOVEMENT
-	# -------------------------
 	else:
-		var current_speed = speed
 
-		if is_crouching:
-			current_speed = crouch_speed
-		elif is_sprinting and is_on_floor():
-			current_speed = sprint_speed
+		if is_sliding:
+			slide_timer -= delta
 
-		if direction:
-			velocity.x = direction.x * current_speed
-			velocity.z = direction.z * current_speed
+			var slope_factor := 1.0
+			if is_on_floor():
+				var n = get_floor_normal()
+				var slope = rad_to_deg(acos(n.dot(Vector3.UP)))
+				if slope > 5.0:
+					slope_factor = 1.0 + (slope / 45.0) * slope_slide_boost
+
+			slide_speed -= slide_friction * delta
+			slide_speed = max(slide_speed, 0.0)
+
+			velocity.x = slide_direction.x * slide_speed * slope_factor
+			velocity.z = slide_direction.z * slide_speed * slope_factor
+
+			if slide_timer <= 0.0 or slide_speed < 2.0:
+				stop_slide()
+
 		else:
-			velocity.x = move_toward(velocity.x, 0, current_speed * 0.2)
-			velocity.z = move_toward(velocity.z, 0, current_speed * 0.2)
+			var current_speed = speed
 
-	# -------------------------
-	# 🧠 JUMP SYSTEM (UPGRADED)
-	# -------------------------
+			if is_crouching:
+				current_speed = crouch_speed
+			elif is_sprinting and is_on_floor():
+				current_speed = sprint_speed
+
+			if direction:
+				velocity.x = direction.x * current_speed
+				velocity.z = direction.z * current_speed
+			else:
+				velocity.x = move_toward(velocity.x, 0, current_speed * 0.2)
+				velocity.z = move_toward(velocity.z, 0, current_speed * 0.2)
+
 	if Input.is_action_just_pressed("jump"):
 
-		# NORMAL + SPRINT + SLIDE JUMP BOOST
 		if is_on_floor():
 			var final_jump := jump_velocity
 
@@ -216,7 +230,6 @@ func _physics_process(delta: float) -> void:
 			if is_sliding:
 				final_jump *= slide_jump_boost
 
-				# slide exit speed boost
 				var horiz := Vector2(velocity.x, velocity.z)
 				horiz *= slide_exit_speed_boost
 				velocity.x = horiz.x
@@ -224,14 +237,11 @@ func _physics_process(delta: float) -> void:
 
 			velocity.y = final_jump
 
-		# 🧠 WALL HOP (ULTRAKILL STYLE BOOSTED)
 		elif is_on_wall():
 			var wall_normal = get_wall_normal()
 
-			# stronger push off wall
 			velocity += wall_normal * wall_jump_speed_scale
 
-			# speed-based vertical boost
 			var horizontal_speed = Vector2(velocity.x, velocity.z).length()
 
 			var up_boost = clamp(
@@ -242,12 +252,8 @@ func _physics_process(delta: float) -> void:
 
 			velocity.y = up_boost
 
-			# forward carry
 			velocity += -transform.basis.z * wall_jump_speed_scale
 
-	# -------------------------
-	# 🐇 BUNNY HOPPING
-	# -------------------------
 	if is_on_floor():
 		if not was_on_floor:
 			if velocity.length() > speed:
@@ -269,6 +275,23 @@ func _physics_process(delta: float) -> void:
 	update_fov(delta)
 	update_camera_tilt(delta)
 	apply_headbob(delta)
+
+
+# -------------------------
+# DASH FUNCTION
+# -------------------------
+func start_dash():
+	is_dashing = true
+	dash_timer = dash_duration
+	dash_cooldown_timer = dash_cooldown
+
+	var input_dir := Input.get_vector("move_left","move_right","move_forward","move_back")
+	var dir := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
+
+	if dir.length() == 0:
+		dir = -transform.basis.z
+
+	dash_direction = dir.normalized()
 
 
 # -------------------------
@@ -312,14 +335,18 @@ func can_stand_up() -> bool:
 func update_fov(delta: float) -> void:
 	var target = normal_fov
 
-	if is_sliding:
+	var sprint_multiplier := 1.6 if is_sprinting else 1.0
+
+	if is_dashing:
+		target = dash_fov
+	elif is_sliding:
 		target = slide_fov
 	elif is_sprinting:
 		target = sprint_fov
 	elif is_crouching:
 		target = normal_fov - 5.0
 
-	current_fov = lerp(current_fov, target, fov_speed * delta)
+	current_fov = lerp(current_fov, target, fov_speed * sprint_multiplier * delta)
 	camera.fov = current_fov
 
 
