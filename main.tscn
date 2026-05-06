@@ -1,6 +1,17 @@
 [gd_scene format=3 uid="uid://cqow47bch5ocs"]
 
 [ext_resource type="Script" uid="uid://b0gd8hrqpvtbb" path="res://player.gd" id="1_ig7tw"]
+[ext_resource type="Script" uid="uid://datjo4mngacbo" path="res://day_night_cycle.gd" id="2_0xm2m"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
+
+[sub_resource type="Sky" id="Sky_h2yge"]
+sky_material = SubResource("ProceduralSkyMaterial_0xm2m")
+
+[sub_resource type="Environment" id="Environment_1bvp3"]
+background_mode = 2
+sky = SubResource("Sky_h2yge")
+tonemap_mode = 3
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ig7tw"]
 
@@ -8,6 +19,9 @@
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_7dm0k"]
 size = Vector2(40, 40)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_0xm2m"]
+albedo_color = Color(0.19076231, 0.19076234, 0.19076231, 1)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_ig7tw"]
 size = Vector3(40, 0.1, 40)
@@ -23,18 +37,33 @@ size = Vector3(40, 0.1, 40)
 [sub_resource type="BoxShape3D" id="BoxShape3D_0xm2m"]
 size = Vector3(0.9897461, 1, 1)
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1bvp3"]
+
 [node name="Node3D" type="Node3D" unique_id=1205225603]
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=143563575]
+[node name="DayNightCycle" type="Node3D" parent="." unique_id=1911056165 node_paths=PackedStringArray("sun", "moon")]
+script = ExtResource("2_0xm2m")
+sun = NodePath("../sun")
+moon = NodePath("../moon")
+cycle_speed = 20.0
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1345094640]
+[node name="sun" type="DirectionalLight3D" parent="." unique_id=1230024567]
+light_energy = 2.0
 shadow_enabled = true
 
+[node name="moon" type="DirectionalLight3D" parent="." unique_id=1546154781]
+light_color = Color(0.8909941, 0.99999994, 0.9981051, 1)
+light_energy = 0.8
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=143563575]
+environment = SubResource("Environment_1bvp3")
+
 [node name="Ground" type="MeshInstance3D" parent="." unique_id=1511768674]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0075335503, 0.02169919, 0.022922158)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.022609234, -0.0004146099, 0.019275308)
 material_override = SubResource("StandardMaterial3D_ig7tw")
 material_overlay = SubResource("ShaderMaterial_0xm2m")
 mesh = SubResource("PlaneMesh_7dm0k")
+surface_material_override/0 = SubResource("StandardMaterial3D_0xm2m")
 
 [node name="StaticBody3D" type="StaticBody3D" parent="Ground" unique_id=964121023]
 
@@ -55,15 +84,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 [node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=1413065017]
 current = true
 
-[node name="sun" type="DirectionalLight3D" parent="." unique_id=422222544]
-transform = Transform3D(0.8222533, -0.24395478, 0.51418436, 7.28882e-09, 0.90346986, 0.4286513, -0.5691216, -0.35245994, 0.7428812, 0.20638585, 26.892277, 27.424915)
-light_energy = 0.653
-light_indirect_energy = 1.96
-light_volumetric_fog_energy = 3.376
-light_angular_distance = 4.01
-light_specular = 1.713
-shadow_enabled = true
-
 [node name="wall" type="MeshInstance3D" parent="." unique_id=1433370057]
 transform = Transform3D(8.517738, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.1822028, 6.987879)
 material_override = SubResource("StandardMaterial3D_h2yge")
@@ -77,24 +97,12 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.0024300218, -0.0007583499,
 shape = SubResource("BoxShape3D_0xm2m")
 debug_color = Color(0.99595994, 0.9918212, 0.9971054, 1)
 
-[node name="lightMakeObjectVis" type="DirectionalLight3D" parent="." unique_id=1863287790]
-transform = Transform3D(-0.94574565, -4.1135095e-10, 0.32490793, -0.32264185, 0.11790138, -0.9391494, -0.03830709, -0.99302554, -0.11150471, 0, 18.405357, -15.2402725)
-light_energy = 0.1
-light_indirect_energy = 3.485
-light_volumetric_fog_energy = 3.24
-light_negative = true
-light_specular = 1.75
-
-[node name="DirectionalLight3D2" type="DirectionalLight3D" parent="." unique_id=1734477687]
-transform = Transform3D(0.99921554, 0.03273302, 0.02228873, 0.021402905, 0.027167032, -0.99940175, -0.03331896, 0.9990948, 0.02644514, 0, 24.979078, 0)
-light_color = Color(0.19434929, 0.19434926, 0.19434926, 1)
-light_energy = 2.822
-
 [node name="wall2" type="MeshInstance3D" parent="." unique_id=2127589073]
 transform = Transform3D(8.517738, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.1822028, -7.923192)
 material_override = SubResource("StandardMaterial3D_h2yge")
 material_overlay = SubResource("ShaderMaterial_1bvp3")
 mesh = SubResource("BoxMesh_ig7tw")
+surface_material_override/0 = SubResource("StandardMaterial3D_1bvp3")
 
 [node name="StaticBody3D" type="StaticBody3D" parent="wall2" unique_id=1714799236]
 

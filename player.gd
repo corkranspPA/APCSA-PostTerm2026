@@ -29,6 +29,21 @@ var crouch_cam_y := 0.8
 var headspace_check_distance := 0.6
 
 
+# -------------------------
+# HEAD BOB
+# -------------------------
+var bob_time := 0.0
+var base_camera_pos := Vector3.ZERO
+
+@export var walk_bob_speed := 8.0
+@export var sprint_bob_speed := 13.0
+@export var crouch_bob_speed := 5.0
+
+@export var walk_bob_amount := 0.09
+@export var sprint_bob_amount := 0.16
+@export var crouch_bob_amount := 0.03
+
+
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 
@@ -40,6 +55,8 @@ func _ready() -> void:
 
 	stand_cam_y = camera.position.y
 	crouch_cam_y = stand_cam_y - 0.8
+
+	base_camera_pos = camera.position
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -70,7 +87,7 @@ func _physics_process(delta: float) -> void:
 	if not is_crouching and not can_stand_up():
 		is_crouching = true
 
-	# landing hook (optional)
+	# landing hook
 	if not was_on_floor and is_on_floor():
 		pass
 
@@ -95,14 +112,17 @@ func _physics_process(delta: float) -> void:
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
 	# -------------------------
-	# SPEED LOGIC (NOW SUPPORTS CROUCH + SPRINT TOGETHER)
+	# SPEED LOGIC (SPRINT + CROUCH COMBO)
 	# -------------------------
 	var current_speed = speed
 
 	if is_crouching:
 		current_speed = crouch_speed
-		if is_sprinting:
-			current_speed += 2.0  # sprint boost while crouched
+
+		# sprint still works while crouched (boost)
+		if is_sprinting and is_on_floor():
+			current_speed += 2.5
+
 	elif is_sprinting and is_on_floor():
 		current_speed = sprint_speed
 
@@ -115,6 +135,11 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0, current_speed)
 
 	move_and_slide()
+
+	# -------------------------
+	# HEAD BOB
+	# -------------------------
+	apply_headbob(delta)
 
 
 # -------------------------
@@ -134,7 +159,7 @@ func can_stand_up() -> bool:
 
 
 # -------------------------
-# CROUCH SYSTEM (SMOOTH)
+# CROUCH SYSTEM
 # -------------------------
 func handle_crouch(delta: float) -> void:
 	var shape = collision.shape as CapsuleShape3D
@@ -148,3 +173,40 @@ func handle_crouch(delta: float) -> void:
 	shape.height = lerp(shape.height, target_height, crouch_lerp_speed * delta)
 	collision.position.y = lerp(collision.position.y, target_collision_y, crouch_lerp_speed * delta)
 	camera.position.y = lerp(camera.position.y, target_cam_y, crouch_lerp_speed * delta)
+
+
+# -------------------------
+# HEAD BOB SYSTEM (SPRINT + CROUCH COMBO)
+# -------------------------
+func apply_headbob(delta: float) -> void:
+	var is_moving := is_on_floor() and velocity.length() > 0.1
+
+	if not is_moving:
+		bob_time = 0.0
+		camera.position = camera.position.lerp(base_camera_pos, 10.0 * delta)
+		return
+
+	var speed := walk_bob_speed
+	var amount := walk_bob_amount
+
+	if is_crouching:
+		speed = crouch_bob_speed
+		amount = crouch_bob_amount
+	elif is_sprinting:
+		speed = sprint_bob_speed
+		amount = sprint_bob_amount
+
+	# 🔥 combo boost: crouch + sprint = stronger motion
+	if is_crouching and is_sprinting:
+		speed *= 1.2
+		amount *= 1.6
+
+	bob_time += delta * speed
+
+	var bob_offset := Vector3(
+		sin(bob_time * 2.5) * amount * 0.4,
+		sin(bob_time * 1.2) * amount * 1.8,
+		0
+	)
+
+	camera.position = camera.position.lerp(base_camera_pos + bob_offset, 12.0 * delta)
