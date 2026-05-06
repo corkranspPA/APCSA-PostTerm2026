@@ -70,6 +70,15 @@ var base_camera_pos := Vector3.ZERO
 @export var sprint_bob_amount := 0.16
 @export var crouch_bob_amount := 0.03
 
+# -------------------------
+# BUNNY HOPPING
+# -------------------------
+@export var bhop_speed_boost := 1.05
+@export var max_bhop_speed := 18.0
+@export var auto_bhop := true
+
+var was_on_floor := false
+
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -139,6 +148,9 @@ func _physics_process(delta: float) -> void:
 
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
+	# -------------------------
+	# SLIDING
+	# -------------------------
 	if is_sliding:
 		slide_timer -= delta
 
@@ -158,6 +170,9 @@ func _physics_process(delta: float) -> void:
 		if slide_timer <= 0.0 or slide_speed < 2.0:
 			stop_slide()
 
+	# -------------------------
+	# NORMAL MOVEMENT
+	# -------------------------
 	else:
 		var current_speed = speed
 
@@ -170,8 +185,27 @@ func _physics_process(delta: float) -> void:
 			velocity.x = direction.x * current_speed
 			velocity.z = direction.z * current_speed
 		else:
-			velocity.x = move_toward(velocity.x, 0, current_speed)
-			velocity.z = move_toward(velocity.z, 0, current_speed)
+			velocity.x = move_toward(velocity.x, 0, current_speed * 0.2)
+			velocity.z = move_toward(velocity.z, 0, current_speed * 0.2)
+
+	# -------------------------
+	# BUNNY HOP SYSTEM
+	# -------------------------
+	if is_on_floor():
+		if not was_on_floor:
+			if velocity.length() > speed:
+				velocity.x *= bhop_speed_boost
+				velocity.z *= bhop_speed_boost
+
+				var h_vel := Vector2(velocity.x, velocity.z)
+				h_vel = h_vel.limit_length(max_bhop_speed)
+				velocity.x = h_vel.x
+				velocity.z = h_vel.y
+
+		if auto_bhop and Input.is_action_pressed("jump"):
+			velocity.y = jump_velocity
+
+	was_on_floor = is_on_floor()
 
 	move_and_slide()
 
@@ -192,21 +226,16 @@ func start_slide():
 	if slide_direction.length() == 0:
 		slide_direction = -transform.basis.z
 
-	camera.fov = slide_fov
 	is_crouching = true
 
 
 func stop_slide():
 	is_sliding = false
 
-	# SAFE STAND LOGIC
 	if can_stand_up():
 		is_crouching = false
 
 
-# -------------------------
-# REQUIRED FIX (WAS MISSING)
-# -------------------------
 func can_stand_up() -> bool:
 	var space_state = get_world_3d().direct_space_state
 
