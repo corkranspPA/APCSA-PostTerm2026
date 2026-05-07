@@ -105,6 +105,16 @@ var base_camera_pos := Vector3.ZERO
 
 var was_on_floor := false
 
+# -------------------------
+# WALL CLING
+# -------------------------
+@export var wall_cling_gravity_scale := 0.08
+@export var wall_cling_max_slide_speed := 2.0
+@export var wall_cling_fov := 88.0
+
+var is_wall_clinging := false
+var wall_cling_normal := Vector3.ZERO
+
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -145,9 +155,12 @@ func _physics_process(delta: float) -> void:
 	if is_sliding:
 		is_crouching = true
 
+	if is_crouching and not is_sliding:
+		is_sprinting = false
+
 	handle_crouch(delta)
 
-	if Input.is_action_just_pressed("sprint"):
+	if Input.is_action_just_pressed("sprint") and not is_crouching:
 		is_sprinting = !is_sprinting
 
 	var input_dir := Input.get_vector(
@@ -171,8 +184,22 @@ func _physics_process(delta: float) -> void:
 	elif Input.is_action_just_pressed("crouch") and is_on_floor() and not is_sliding:
 		is_crouching = !is_crouching
 
+	# Wall cling: attach when hitting a wall in the air
+	if is_on_wall() and not is_on_floor() and not is_wall_clinging and velocity.y < 0.0:
+		is_wall_clinging = true
+		wall_cling_normal = get_wall_normal()
+		velocity = Vector3.ZERO
+
+	# Stop clinging only when landing on the floor
+	if is_wall_clinging and is_on_floor():
+		is_wall_clinging = false
+
 	if not is_on_floor():
-		velocity += get_gravity() * delta
+		if is_wall_clinging:
+			# Completely freeze the player to the wall
+			velocity = Vector3.ZERO
+		else:
+			velocity += get_gravity() * delta
 
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
@@ -182,6 +209,9 @@ func _physics_process(delta: float) -> void:
 
 		if dash_timer <= 0.0:
 			is_dashing = false
+
+	elif is_wall_clinging:
+		velocity = Vector3.ZERO
 
 	else:
 
@@ -237,6 +267,24 @@ func _physics_process(delta: float) -> void:
 
 			velocity.y = final_jump
 
+		elif is_wall_clinging:
+			# Jump off the wall
+			is_wall_clinging = false
+
+			var wall_normal = wall_cling_normal
+			velocity += wall_normal * wall_jump_speed_scale
+
+			var horizontal_speed = Vector2(velocity.x, velocity.z).length()
+
+			var up_boost = clamp(
+				horizontal_speed * 0.22 * wall_jump_up_boost,
+				min_wall_jump_up * wall_jump_up_boost,
+				max_wall_jump_up * wall_jump_up_boost
+			)
+
+			velocity.y = up_boost
+			velocity += -transform.basis.z * wall_jump_speed_scale
+
 		elif is_on_wall():
 			var wall_normal = get_wall_normal()
 
@@ -281,6 +329,9 @@ func _physics_process(delta: float) -> void:
 # DASH FUNCTION
 # -------------------------
 func start_dash():
+	if is_crouching:
+		return
+
 	is_dashing = true
 	dash_timer = dash_duration
 	dash_cooldown_timer = dash_cooldown
@@ -314,6 +365,7 @@ func stop_slide():
 
 	if can_stand_up():
 		is_crouching = false
+		is_sprinting = true
 
 
 func can_stand_up() -> bool:
@@ -339,6 +391,8 @@ func update_fov(delta: float) -> void:
 
 	if is_dashing:
 		target = dash_fov
+	elif is_wall_clinging:
+		target = wall_cling_fov
 	elif is_sliding:
 		target = slide_fov
 	elif is_sprinting:
@@ -356,7 +410,10 @@ func update_fov(delta: float) -> void:
 func update_camera_tilt(delta: float) -> void:
 	var target_roll := 0.0
 
-	if is_sliding:
+	if is_wall_clinging:
+		# Tilt toward the wall based on which side it's on
+		target_roll = -wall_cling_normal.x * 12.0
+	elif is_sliding:
 		target_roll = slide_tilt_amount * slide_direction.x
 
 	camera.rotation.z = lerp(camera.rotation.z, deg_to_rad(target_roll), 6.0 * delta)
