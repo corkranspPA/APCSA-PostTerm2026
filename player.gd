@@ -184,11 +184,32 @@ func _physics_process(delta: float) -> void:
 	elif Input.is_action_just_pressed("crouch") and is_on_floor() and not is_sliding:
 		is_crouching = !is_crouching
 
-	# Wall cling: attach when hitting a wall in the air
-	if is_on_wall() and not is_on_floor() and not is_wall_clinging and velocity.y < 0.0:
-		is_wall_clinging = true
-		wall_cling_normal = get_wall_normal()
-		velocity = Vector3.ZERO
+	# Wall cling: only attach if a center raycast confirms solid wall contact
+	if is_on_wall() and not is_on_floor() and not is_wall_clinging and not is_sliding and velocity.y < 0.0:
+		var space_state = get_world_3d().direct_space_state
+		var ray = PhysicsRayQueryParameters3D.create(
+			global_position,
+			global_position + (-wall_cling_normal if wall_cling_normal != Vector3.ZERO else -transform.basis.z) * 0.6
+		)
+		ray.exclude = [self]
+		# Also cast from chest and waist height to confirm broad contact
+		var ray_chest = PhysicsRayQueryParameters3D.create(
+			global_position + Vector3.UP * 0.5,
+			global_position + Vector3.UP * 0.5 + (-get_wall_normal()) * 0.6
+		)
+		ray_chest.exclude = [self]
+		var ray_waist = PhysicsRayQueryParameters3D.create(
+			global_position + Vector3.DOWN * 0.3,
+			global_position + Vector3.DOWN * 0.3 + (-get_wall_normal()) * 0.6
+		)
+		ray_waist.exclude = [self]
+		var hit_center = not space_state.intersect_ray(ray).is_empty()
+		var hit_chest = not space_state.intersect_ray(ray_chest).is_empty()
+		var hit_waist = not space_state.intersect_ray(ray_waist).is_empty()
+		var hits = int(hit_center) + int(hit_chest) + int(hit_waist)
+		if hits >= 2:
+			is_wall_clinging = true
+			wall_cling_normal = get_wall_normal()
 
 	# Stop clinging only when landing on the floor
 	if is_wall_clinging and is_on_floor():
