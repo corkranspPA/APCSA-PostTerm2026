@@ -133,6 +133,14 @@ func _ready() -> void:
 	base_camera_pos = camera.position
 
 
+func _input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		mouse_captured = !mouse_captured
+		Input.set_mouse_mode(
+			Input.MOUSE_MODE_CAPTURED if mouse_captured else Input.MOUSE_MODE_VISIBLE
+		)
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and mouse_captured:
 		rotate_y(-event.relative.x * mouse_sensitivity)
@@ -140,12 +148,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		pitch -= event.relative.y * mouse_sensitivity
 		pitch = clamp(pitch, deg_to_rad(-89), deg_to_rad(89))
 		head.rotation.x = pitch
-
-	if event.is_action_pressed("ui_cancel"):
-		mouse_captured = !mouse_captured
-		Input.set_mouse_mode(
-			Input.MOUSE_MODE_CAPTURED if mouse_captured else Input.MOUSE_MODE_VISIBLE
-		)
 
 
 func _physics_process(delta: float) -> void:
@@ -340,6 +342,15 @@ func _physics_process(delta: float) -> void:
 	was_on_floor = is_on_floor()
 
 	move_and_slide()
+
+	if global_position.y < -20.0:
+		global_position = Vector3(0, 2, 0)
+		velocity = Vector3.ZERO
+		is_sliding = false
+		is_dashing = false
+		is_wall_clinging = false
+		is_crouching = false
+		is_sprinting = false
 
 	update_fov(delta)
 	update_camera_tilt(delta)
