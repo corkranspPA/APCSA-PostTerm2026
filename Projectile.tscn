@@ -1,0 +1,12 @@
+[gd_scene format=3 uid="uid://dc1h72qy67w3g"]
+
+[ext_resource type="Script" uid="uid://c5tnjksm2any1" path="res://bullet_tscn.gd" id="1_t7eop"]
+
+[node name="Node3D" type="Node3D" unique_id=1721511381]
+
+[node name="bullet_tscn" type="Area3D" parent="." unique_id=149293979]
+script = ExtResource("1_t7eop")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="bullet_tscn" unique_id=620661042]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="bullet_tscn" unique_id=1283731528]

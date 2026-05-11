@@ -4,6 +4,8 @@
 [ext_resource type="Script" uid="uid://datjo4mngacbo" path="res://day_night_cycle.gd" id="2_0xm2m"]
 [ext_resource type="Texture2D" uid="uid://dv173pdrq7k6e" path="res://grass.jpg" id="2_1bvp3"]
 [ext_resource type="Texture2D" uid="uid://blg8updhrtu4r" path="res://stone road.jpeg" id="3_h2yge"]
+[ext_resource type="Script" uid="uid://ly8por15wthv" path="res://fps_shooter.gd" id="4_7mycd"]
+[ext_resource type="PackedScene" uid="uid://ctp0o18g7yp8p" path="res://Bullet.tscn" id="5_272bh"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
 
@@ -109,6 +111,18 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 
 [node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=1413065017]
 current = true
+
+[node name="weaponHolder" type="Node3D" parent="Player/Head/Camera3D" unique_id=224750740]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18549979, -0.091952085, 0)
+
+[node name="muzzlePoint" type="Marker3D" parent="Player/Head/Camera3D/weaponHolder" unique_id=635041625]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.3, -0.2, -1)
+
+[node name="fpsShooter" type="Node" parent="Player" unique_id=2007060730]
+script = ExtResource("4_7mycd")
+bullet_scene = ExtResource("5_272bh")
+camera_path = NodePath("../Head/Camera3D")
+muzzle_path = NodePath("../Head/Camera3D/weaponHolder/muzzlePoint")
 
 [node name="wall" type="MeshInstance3D" parent="." unique_id=1433370057]
 transform = Transform3D(8.517738, 0, 0, 0, 4.3503304, 0, 0, 0, 1, 0, 2.8392262, 6.987879)
