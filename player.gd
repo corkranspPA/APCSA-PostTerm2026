@@ -67,6 +67,7 @@ var current_fov := 75.0
 @onready var head: Node3D = $Head
 @onready var camera: Camera3D = $Head/Camera3D
 @onready var collision: CollisionShape3D = $CollisionShape3D
+@onready var weapon: Node = $Weapon  # adjust this path to match your scene tree
 
 var pitch := 0.0
 var mouse_captured := true
@@ -132,6 +133,10 @@ func _ready() -> void:
 
 	base_camera_pos = camera.position
 
+	# ---- NEW: give the weapon a reference to this player ----
+	if weapon:
+		weapon.player = self
+
 
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel"):
@@ -186,7 +191,6 @@ func _physics_process(delta: float) -> void:
 	elif Input.is_action_just_pressed("crouch") and is_on_floor() and not is_sliding:
 		is_crouching = !is_crouching
 
-	# Wall cling: only attach if a center raycast confirms solid wall contact
 	if is_on_wall() and not is_on_floor() and not is_wall_clinging and not is_sliding and velocity.y < 0.0:
 		var space_state = get_world_3d().direct_space_state
 		var ray = PhysicsRayQueryParameters3D.create(
@@ -194,7 +198,6 @@ func _physics_process(delta: float) -> void:
 			global_position + (-wall_cling_normal if wall_cling_normal != Vector3.ZERO else -transform.basis.z) * 0.6
 		)
 		ray.exclude = [self]
-		# Also cast from chest and waist height to confirm broad contact
 		var ray_chest = PhysicsRayQueryParameters3D.create(
 			global_position + Vector3.UP * 0.5,
 			global_position + Vector3.UP * 0.5 + (-get_wall_normal()) * 0.6
@@ -213,13 +216,11 @@ func _physics_process(delta: float) -> void:
 			is_wall_clinging = true
 			wall_cling_normal = get_wall_normal()
 
-	# Stop clinging only when landing on the floor
 	if is_wall_clinging and is_on_floor():
 		is_wall_clinging = false
 
 	if not is_on_floor():
 		if is_wall_clinging:
-			# Completely freeze the player to the wall
 			velocity = Vector3.ZERO
 		else:
 			velocity += get_gravity() * delta
@@ -291,7 +292,6 @@ func _physics_process(delta: float) -> void:
 			velocity.y = final_jump
 
 		elif is_wall_clinging:
-			# Jump off the wall
 			is_wall_clinging = false
 
 			var wall_normal = wall_cling_normal
@@ -322,7 +322,6 @@ func _physics_process(delta: float) -> void:
 			)
 
 			velocity.y = up_boost
-
 			velocity += -transform.basis.z * wall_jump_speed_scale
 
 	if is_on_floor():
@@ -443,7 +442,6 @@ func update_camera_tilt(delta: float) -> void:
 	var target_roll := 0.0
 
 	if is_wall_clinging:
-		# Tilt toward the wall based on which side it's on
 		target_roll = -wall_cling_normal.x * 12.0
 	elif is_sliding:
 		target_roll = slide_tilt_amount * slide_direction.x

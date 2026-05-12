@@ -2,106 +2,83 @@ extends RigidBody3D
 class_name Bullet
 
 # -------------------------
-# BULLET STATS
+# STATS
 # -------------------------
-@export var speed := 80.0
-@export var damage := 25.0
-@export var headshot_multiplier := 2.0
-@export var gravity_scale_value := 0.08   # slight bullet drop
-@export var lifetime := 3.0               # seconds before auto-free
-@export var impact_scene: PackedScene     # optional impact VFX
+@export var speed: float = 80.0
+@export var damage: float = 25.0
+@export var headshot_multiplier: float = 2.0
+@export var gravity_scale_value: float = 0.08
+@export var lifetime: float = 3.0
+@export var impact_scene: PackedScene
 
-# -------------------------
-# VARIABLES
-# -------------------------
-var shooter
-var direction := Vector3.ZERO
+var shooter: Node = null
+var direction: Vector3 = Vector3.ZERO
 
 # -------------------------
 # READY
 # -------------------------
 func _ready() -> void:
-	# Enable collision monitoring
 	contact_monitor = true
-	max_contacts_reported = 1
-	body_entered.connect(_on_body_entered)
-
-	# Ignore collision with shooter
-	if shooter:
-		add_collision_exception_with(shooter)
-
-	# Apply gravity scale
+	max_contacts_reported = 4
 	gravity_scale = gravity_scale_value
-
-	# Set initial velocity
-	if direction != Vector3.ZERO:
-		linear_velocity = direction.normalized() * speed
-	else:
-		linear_velocity = -global_transform.basis.z * speed
-
-	# Auto-despawn timer
+	# IMPORTANT: prevent physics from "fighting" initial velocity
+	sleeping = false
+	freeze = false
+	body_entered.connect(_on_body_entered)
+	
+	# auto delete
 	await get_tree().create_timer(lifetime).timeout
-
 	if is_instance_valid(self):
 		queue_free()
 
-
 # -------------------------
-# LAUNCH FUNCTION
+# LAUNCH
 # -------------------------
-func launch(origin: Vector3, dir: Vector3, from_shooter) -> void:
+func launch(origin: Vector3, dir: Vector3, from_shooter: Node) -> void:
 	shooter = from_shooter
 	direction = dir.normalized()
-
 	global_position = origin
 	look_at(origin + direction, Vector3.UP)
-
+	
+	# force physics update cleanly
+	linear_velocity = Vector3.ZERO
+	angular_velocity = Vector3.ZERO
+	
+	# apply velocity AFTER placement
 	linear_velocity = direction * speed
-
-	# Ignore shooter collision
+	
+	# ignore shooter
 	if shooter:
 		add_collision_exception_with(shooter)
 
-
 # -------------------------
-# HIT DETECTION
+# COLLISION
 # -------------------------
 func _on_body_entered(body: Node) -> void:
-	# Prevent self-hit
 	if body == shooter:
 		return
-
-	var hit_point := global_position
-
-	# Detect headshot
-	var is_headshot := body.is_in_group("head")
-
-	var damage_dealt := damage
+	
+	var hit_point: Vector3 = global_position
+	var is_headshot: bool = body.is_in_group("head")
+	var dmg: float = damage
 	if is_headshot:
-		damage_dealt *= headshot_multiplier
-
-	# Deal damage directly
+		dmg *= headshot_multiplier
+	
 	if body.has_method("take_damage"):
-		body.take_damage(damage_dealt, hit_point, shooter)
-
-	# Deal damage to parent if hitbox is child
+		body.take_damage(dmg, hit_point, shooter)
 	elif body.get_parent() and body.get_parent().has_method("take_damage"):
-		body.get_parent().take_damage(damage_dealt, hit_point, shooter)
-
-	# Spawn impact VFX
+		body.get_parent().take_damage(dmg, hit_point, shooter)
+	
 	if impact_scene:
 		var impact = impact_scene.instantiate()
-		get_tree().root.add_child(impact)
+		get_tree().current_scene.add_child(impact)
 		impact.global_position = hit_point
-
-	# Destroy bullet
+	
 	queue_free()
 
-
 # -------------------------
-# PROCESS
+# DEBUG VISUAL DIRECTION
 # -------------------------
 func _process(delta: float) -> void:
-	# Rotate bullet toward velocity direction for realism
 	if linear_velocity.length() > 0.1:
 		look_at(global_position + linear_velocity.normalized(), Vector3.UP)
