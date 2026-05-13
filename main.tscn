@@ -114,17 +114,17 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 [node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=1413065017]
 current = true
 
-[node name="weaponHolder" type="Node3D" parent="Player/Head/Camera3D" unique_id=224750740]
+[node name="Weapon" type="Node3D" parent="Player/Head/Camera3D" unique_id=224750740]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18549979, -0.091952085, 0)
 
-[node name="muzzlePoint" type="Marker3D" parent="Player/Head/Camera3D/weaponHolder" unique_id=635041625]
+[node name="muzzlePoint" type="Marker3D" parent="Player/Head/Camera3D/Weapon" unique_id=635041625]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.3, -0.2, -1)
 
-[node name="fpsShooter" type="Node" parent="Player" unique_id=2007060730]
+[node name="Weapon" type="Node" parent="Player" unique_id=2007060730]
 script = ExtResource("4_7mycd")
 bullet_scene = ExtResource("5_272bh")
 camera_path = NodePath("../Head/Camera3D")
-muzzle_path = NodePath("../Head/Camera3D/weaponHolder/muzzlePoint")
+muzzle_path = NodePath("../Head/Camera3D/Weapon/muzzlePoint")
 
 [node name="wall" type="MeshInstance3D" parent="." unique_id=1433370057]
 transform = Transform3D(8.517738, 0, 0, 0, 4.3503304, 0, 0, 0, 1, 0, 2.8392262, 6.987879)

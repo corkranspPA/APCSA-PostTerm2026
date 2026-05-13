@@ -89,13 +89,6 @@ func shoot() -> void:
 	current_ammo -= 1
 	shoot_cooldown = fire_rate
 
-	# -------------------------
-	# SPAWN BULLET
-	# -------------------------
-	var bullet = bullet_scene.instantiate()
-	get_tree().root.add_child(bullet)
-	bullet.global_position = muzzle.global_position
-
 	# Direction
 	var direction = -camera.global_transform.basis.z
 
@@ -114,9 +107,12 @@ func shoot() -> void:
 	direction.z += randf_range(-spread_amount, spread_amount)
 	direction = direction.normalized()
 
-	# Launch
-	if bullet.has_method("launch"):
-		bullet.launch(muzzle.global_position, direction, player)
+	# -------------------------
+	# SPAWN BULLET
+	# -------------------------
+	var bullet = bullet_scene.instantiate()
+	bullet.get_child(0).launch(muzzle.global_position, direction, player)  # launch BEFORE add_child
+	get_tree().root.add_child(bullet)                         # add AFTER launch
 
 	# -------------------------
 	# RECOIL
@@ -129,7 +125,6 @@ func shoot() -> void:
 	else:
 		camera.rotation.x -= deg_to_rad(recoil_vertical)
 		camera.rotation.y += deg_to_rad(randf_range(-recoil_horizontal, recoil_horizontal))
-
 # =========================
 # RELOAD
 # =========================

@@ -67,7 +67,7 @@ var current_fov := 75.0
 @onready var head: Node3D = $Head
 @onready var camera: Camera3D = $Head/Camera3D
 @onready var collision: CollisionShape3D = $CollisionShape3D
-@onready var weapon: Node = $Weapon  # adjust this path to match your scene tree
+@onready var Weapon: Node = $Weapon  # adjust this path to match your scene tree
 
 var pitch := 0.0
 var mouse_captured := true
@@ -134,8 +134,8 @@ func _ready() -> void:
 	base_camera_pos = camera.position
 
 	# ---- NEW: give the weapon a reference to this player ----
-	if weapon:
-		weapon.player = self
+	if Weapon:
+		Weapon.player = self
 
 
 func _input(event: InputEvent) -> void:
