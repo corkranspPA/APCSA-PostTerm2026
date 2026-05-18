@@ -34,6 +34,9 @@ size = Vector3(40, 0.1, 40)
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_0xm2m"]
 
+[sub_resource type="BoxMesh" id="BoxMesh_7mycd"]
+size = Vector3(0.1, 0.1, 0.4)
+
 [sub_resource type="BoxMesh" id="BoxMesh_ig7tw"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_7mycd"]
@@ -116,15 +119,17 @@ current = true
 
 [node name="Weapon" type="Node3D" parent="Player/Head/Camera3D" unique_id=224750740]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.09065676, -0.091952085, -0.1856618)
-
-[node name="muzzlePoint" type="Marker3D" parent="Player/Head/Camera3D" unique_id=635041625]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.21644682, -0.29195213, -1.1856618)
-
-[node name="Weapon" type="Node" parent="Player" unique_id=2007060730]
 script = ExtResource("4_7mycd")
 bullet_scene = ExtResource("5_272bh")
-camera_path = NodePath("../Head/Camera3D")
-muzzle_path = NodePath("../Head/Camera3D/muzzlePoint")
+camera_path = NodePath("..")
+muzzle_path = NodePath("muzzlePoint")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Player/Head/Camera3D/Weapon" unique_id=80010884]
+transform = Transform3D(1, 0, 0, 0, 1.1560045, 0, 0, 0, 1.2432201, 0.15, -0.20000005, -0.35823393)
+mesh = SubResource("BoxMesh_7mycd")
+
+[node name="muzzlePoint" type="Marker3D" parent="Player/Head/Camera3D/Weapon" unique_id=635041625]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1594685, -0.20338535, -0.55146223)
 
 [node name="wall" type="MeshInstance3D" parent="." unique_id=1433370057]
 transform = Transform3D(8.517738, 0, 0, 0, 4.3503304, 0, 0, 0, 1, 0, 2.8392262, 6.987879)
