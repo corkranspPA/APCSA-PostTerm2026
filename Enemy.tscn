@@ -1,0 +1,52 @@
+[gd_scene format=3 uid="uid://2oqfqxx5b61g"]
+
+[ext_resource type="Script" uid="uid://caj72wyhdpind" path="res://enemy.gd" id="1_tt7e2"]
+[ext_resource type="Texture2D" uid="uid://km64mdcp55uf" path="res://stone wall.jpg" id="2_s7bn3"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_2hac7"]
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_e6d4v"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_qp131"]
+metallic = 1.0
+metallic_texture = ExtResource("2_s7bn3")
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_s7bn3"]
+radius = 6.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_s7bn3"]
+
+[node name="Node3D" type="Node3D" unique_id=1990476701]
+
+[node name="enemy" type="CharacterBody3D" parent="." unique_id=2126504035 groups=["Enemy"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6570234, 0)
+script = ExtResource("1_tt7e2")
+wobble_speed = 15.0
+wobble_amount = 0.13
+move_speed = 5.0
+detection_radius = 8.0
+sight_range = 20.0
+sight_angle = null
+sound_radius = null
+crouch_sound_radius = null
+gravity = null
+max_health = null
+flash_duration = null
+death_fade_delay = null
+death_fade_duration = null
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="enemy" unique_id=820495282]
+shape = SubResource("CapsuleShape3D_2hac7")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="enemy" unique_id=915580227]
+mesh = SubResource("CapsuleMesh_e6d4v")
+surface_material_override/0 = SubResource("StandardMaterial3D_qp131")
+
+[node name="detectionArea" type="Area3D" parent="enemy" unique_id=1382874252]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="enemy/detectionArea" unique_id=1240665674]
+shape = SubResource("SphereShape3D_s7bn3")
+
+[node name="face" type="MeshInstance3D" parent="enemy" unique_id=673090174]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.010127544, 0.40130782, -0.6570896)
+mesh = SubResource("BoxMesh_s7bn3")

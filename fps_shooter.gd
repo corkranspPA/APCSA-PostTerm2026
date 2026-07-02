@@ -83,7 +83,22 @@ func shoot() -> void:
 	muzzle_flash.visible = true
 	muzzle_light.visible = true
 	get_tree().create_timer(0.05).timeout.connect(func(): muzzle_flash.visible = false; muzzle_light.visible = false)
-	var direction = -camera.global_transform.basis.z
+
+	# raycast from camera center to find exact point crosshair is aimed at
+	var cam_dir = -camera.global_transform.basis.z
+	var from = camera.global_position
+	var to = from + cam_dir * 1000.0
+	var space = get_world_3d().direct_space_state
+	var query = PhysicsRayQueryParameters3D.create(from, to)
+	if player:
+		query.exclude = [player]
+	var result = space.intersect_ray(query)
+	var target_point = result.position if result else to
+
+	# direction from muzzle toward crosshair target point
+	var direction = (target_point - muzzle.global_position).normalized()
+
+	# apply spread
 	var spread_amount = ads_spread if Input.is_action_pressed("aim") else bullet_spread
 	if player:
 		if player.is_sprinting:
@@ -96,9 +111,13 @@ func shoot() -> void:
 	direction.y += randf_range(-spread_amount, spread_amount)
 	direction.z += randf_range(-spread_amount, spread_amount)
 	direction = direction.normalized()
+
+	# spawn bullet in front of camera so it clears the player capsule
+	var spawn_pos = camera.global_position + (-camera.global_transform.basis.z * 0.8)
 	var bullet = bullet_scene.instantiate()
-	bullet.launch(muzzle.global_position, direction, player)
 	get_tree().root.add_child(bullet)
+	bullet.launch(spawn_pos, direction, player)
+
 	await get_tree().create_timer(fire_rate).timeout
 	if not reloading:
 		can_shoot = true

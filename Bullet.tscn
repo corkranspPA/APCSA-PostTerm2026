@@ -11,7 +11,7 @@ transform = Transform3D(0.25, 0, 0, 0, -1.0927847e-08, -0.25, 0, 0.25, -1.092784
 contact_monitor = true
 max_contacts_reported = 1
 script = ExtResource("1_ayd6b")
-speed = 60.0
+speed = 10.0
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=956263317]
 transform = Transform3D(0.25, 0, 0, 0, -1.0927847e-08, -0.25, 0, 0.25, -1.0927847e-08, 0, 0, 0)
@@ -20,3 +20,7 @@ shape = SubResource("CapsuleShape3D_4s4u5")
 [node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=406597307]
 transform = Transform3D(0.25, 0, 0, 0, -1.0927847e-08, -0.25, 0, 0.25, -1.0927847e-08, 0, 0, 0)
 mesh = SubResource("CapsuleMesh_7281b")
+
+[node name="ColorRect" type="ColorRect" parent="." unique_id=538888262]
+offset_right = 40.0
+offset_bottom = 40.0

@@ -67,7 +67,7 @@ var current_fov := 75.0
 @onready var head: Node3D = $Head
 @onready var camera: Camera3D = $Head/Camera3D
 @onready var collision: CollisionShape3D = $CollisionShape3D
-@onready var Weapon: Node = $Weapon  # adjust this path to match your scene tree
+@onready var Weapon = $Head/Camera3D/Weapon  # adjust this path to match your scene tree
 
 var pitch := 0.0
 var mouse_captured := true
