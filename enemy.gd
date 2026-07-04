@@ -46,6 +46,13 @@ var _death_rb: RigidBody3D = null
 var _death_rb_mesh: MeshInstance3D = null
 
 # =========================
+# RESPAWN
+# =========================
+@export var respawn_time := 5.0
+var spawn_position: Vector3 = Vector3.ZERO
+var spawn_rotation: Vector3 = Vector3.ZERO
+
+# =========================
 # STATE
 # =========================
 enum State { IDLE, ALERT, CHASING }
@@ -66,6 +73,8 @@ func _ready() -> void:
 	flash_material.emission_enabled = true
 	flash_material.emission = Color.RED
 	flash_material.emission_energy_multiplier = 2.0
+	spawn_position = global_position
+	spawn_rotation = rotation
 
 func _physics_process(delta: float) -> void:
 	if player == null:
@@ -193,14 +202,12 @@ func die() -> void:
 	velocity = Vector3.ZERO
 	$CollisionShape3D.set_deferred("disabled", true)
 
-	# set up death material
 	death_material = StandardMaterial3D.new()
 	death_material.albedo_color = Color(0.3, 0.0, 0.0, 1.0)
 	death_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	death_material.emission_enabled = true
 	death_material.emission = Color(0.3, 0.0, 0.0)
 
-	# create rigidbody to replace enemy
 	var rb = RigidBody3D.new()
 	_death_rb_mesh = MeshInstance3D.new()
 	_death_rb_mesh.mesh = mesh.mesh
@@ -216,17 +223,17 @@ func die() -> void:
 	get_tree().current_scene.add_child(rb)
 	rb.global_position = global_position
 	rb.global_rotation = global_rotation
-
-	# random tumble impulse
 	rb.apply_impulse(Vector3(randf_range(-1.0, 1.0), 1.0, randf_range(-1.0, 1.0)) * 2.0)
 	rb.apply_torque_impulse(Vector3(randf_range(-2.0, 2.0), 0, randf_range(-2.0, 2.0)))
 
-	# hide original mesh
 	mesh.visible = false
 	_death_rb = rb
 
 	await get_tree().create_timer(death_fade_delay).timeout
 	is_fading = true
+
+	await get_tree().create_timer(death_fade_duration + respawn_time).timeout
+	_respawn()
 
 func _apply_fade(delta: float) -> void:
 	if not is_fading:
@@ -235,7 +242,23 @@ func _apply_fade(delta: float) -> void:
 	var alpha = 1.0 - clamp(death_timer / death_fade_duration, 0.0, 1.0)
 	if death_material:
 		death_material.albedo_color.a = alpha
-	if alpha <= 0.0:
-		if _death_rb and is_instance_valid(_death_rb):
-			_death_rb.queue_free()
-		queue_free()
+
+func _respawn() -> void:
+	if _death_rb and is_instance_valid(_death_rb):
+		_death_rb.queue_free()
+
+	is_dead = false
+	is_fading = false
+	health = max_health
+	death_timer = 0.0
+	state = State.IDLE
+	velocity = Vector3.ZERO
+
+	global_position = spawn_position
+	rotation = spawn_rotation
+
+	$CollisionShape3D.set_deferred("disabled", false)
+	mesh.visible = true
+	mesh.rotation = Vector3.ZERO
+	mesh.position.y = mesh_base_y
+	mesh.set_surface_override_material(0, original_material)

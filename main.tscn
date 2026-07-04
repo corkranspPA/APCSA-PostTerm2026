@@ -92,20 +92,23 @@ camera_path = NodePath("..")
 muzzle_path = NodePath("muzzlePoint")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Player/Head/Camera3D/weapon" unique_id=80010884]
-transform = Transform3D(1, 0, 0, 0, 1.1560045, 0, 0, 0, 1.2432201, 0.15, -0.20000005, -0.35823393)
+transform = Transform3D(0.9975794, 0.003839475, 0.08634849, -0.0034821886, 1.1559947, 0.0027289314, -0.0694476, -0.0028109276, 1.2402141, 0.09330213, -0.1997714, -0.17952824)
 mesh = SubResource("BoxMesh_7mycd")
 
 [node name="muzzlePoint" type="Marker3D" parent="Player/Head/Camera3D/weapon" unique_id=635041625]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1594685, -0.20338535, -0.55146223)
+transform = Transform3D(0.9975797, 0.00332133, 0.06945552, -0.0034821918, 0.9999914, 0.0021950381, -0.06944764, -0.0024316087, 0.99758273, 0.08931568, -0.203614, -0.37293887)
 
 [node name="Muzzle_Light" type="OmniLight3D" parent="Player/Head/Camera3D/weapon/muzzlePoint" unique_id=1181533195]
+visible = false
 light_color = Color(0.87046194, 0.6712684, 0.3237934, 1)
 light_energy = 3.0
 omni_range = 2.0
 
 [node name="Muzzle_Flash" type="MeshInstance3D" parent="Player/Head/Camera3D/weapon/muzzlePoint" unique_id=795763264]
+visible = false
 
 [node name="Core" type="MeshInstance3D" parent="Player/Head/Camera3D/weapon/muzzlePoint/Muzzle_Flash" unique_id=559914518]
+visible = false
 mesh = SubResource("SphereMesh_4c57u")
 
 [node name="NavigationRegion3D" type="NavigationRegion3D" parent="." unique_id=193481439 groups=["player", "source geometry"]]

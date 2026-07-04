@@ -21,8 +21,8 @@ extends Node3D
 # =========================
 # ADS
 # =========================
-@export var normal_fov := 75.0
-@export var ads_fov := 55.0
+@export var normal_fov := 65.0
+@export var ads_fov := 45.0
 @export var ads_speed := 10.0
 
 # =========================
@@ -39,6 +39,7 @@ var can_shoot := true
 var reloading := false
 var shoot_cooldown := 0.0
 var player
+var hip_rotation := Vector3.ZERO
 
 @onready var camera := get_node_or_null(camera_path) as Camera3D
 @onready var muzzle: Node3D = $muzzlePoint
@@ -49,6 +50,7 @@ func _ready() -> void:
 	current_ammo = mag_size
 	muzzle_flash.visible = false
 	muzzle_light.visible = false
+	hip_rotation = rotation
 	if camera == null:
 		push_error("Camera path is broken. Fix camera_path in Inspector.")
 	if muzzle == null:
@@ -69,6 +71,14 @@ func _process(delta: float) -> void:
 	if Input.is_action_just_pressed("reload"):
 		reload()
 
+	# move weapon and straighten rotation when ADS
+	if Input.is_action_pressed("aim"):
+		position = position.lerp(Vector3(0.0, 0.06, -0.5), delta * ads_speed)
+		rotation = rotation.lerp(Vector3(0.0, 0.0, 0.0), delta * ads_speed)
+	else:
+		position = position.lerp(Vector3(0.2, -0.2, -0.5), delta * ads_speed)
+		rotation = rotation.lerp(hip_rotation, delta * ads_speed)
+
 func shoot() -> void:
 	if current_ammo <= 0:
 		reload()
@@ -84,18 +94,18 @@ func shoot() -> void:
 	muzzle_light.visible = true
 	get_tree().create_timer(0.05).timeout.connect(func(): muzzle_flash.visible = false; muzzle_light.visible = false)
 
-	# raycast from camera center to find exact point crosshair is aimed at
+	# raycast from camera center to find what crosshair is pointing at
 	var cam_dir = -camera.global_transform.basis.z
-	var from = camera.global_position
-	var to = from + cam_dir * 1000.0
+	var ray_from = camera.global_position
+	var ray_to = ray_from + cam_dir * 1000.0
 	var space = get_world_3d().direct_space_state
-	var query = PhysicsRayQueryParameters3D.create(from, to)
+	var query = PhysicsRayQueryParameters3D.create(ray_from, ray_to)
 	if player:
 		query.exclude = [player]
 	var result = space.intersect_ray(query)
-	var target_point = result.position if result else to
+	var target_point = result.position if result else ray_to
 
-	# direction from muzzle toward crosshair target point
+	# aim from muzzle toward exact crosshair hit point
 	var direction = (target_point - muzzle.global_position).normalized()
 
 	# apply spread
@@ -112,11 +122,9 @@ func shoot() -> void:
 	direction.z += randf_range(-spread_amount, spread_amount)
 	direction = direction.normalized()
 
-	# spawn bullet in front of camera so it clears the player capsule
-	var spawn_pos = camera.global_position + (-camera.global_transform.basis.z * 0.8)
 	var bullet = bullet_scene.instantiate()
+	bullet.launch(muzzle.global_position, direction, player)
 	get_tree().root.add_child(bullet)
-	bullet.launch(spawn_pos, direction, player)
 
 	await get_tree().create_timer(fire_rate).timeout
 	if not reloading:
@@ -148,6 +156,8 @@ func handle_ads(delta: float) -> void:
 			target_fov = normal_fov
 		elif Input.is_action_pressed("aim"):
 			target_fov = ads_fov
+		elif player.is_sprinting:
+			target_fov = normal_fov
 	else:
 		if Input.is_action_pressed("aim"):
 			target_fov = ads_fov
