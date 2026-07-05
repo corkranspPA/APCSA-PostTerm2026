@@ -6,7 +6,7 @@ extends Node3D
 @export var bullet_scene: PackedScene
 @export var fire_rate := 0.45
 @export var automatic := false
-@export var mag_size := 6
+@export var mag_size := 10
 @export var reserve_ammo := 18
 @export var reload_time := 2.0
 @export var bullet_spread := 0.018
@@ -43,13 +43,9 @@ var hip_rotation := Vector3.ZERO
 
 @onready var camera := get_node_or_null(camera_path) as Camera3D
 @onready var muzzle: Node3D = $muzzlePoint
-@onready var muzzle_flash: MeshInstance3D = $muzzlePoint/Muzzle_Flash
-@onready var muzzle_light: OmniLight3D = $muzzlePoint/Muzzle_Light
 
 func _ready() -> void:
 	current_ammo = mag_size
-	muzzle_flash.visible = false
-	muzzle_light.visible = false
 	hip_rotation = rotation
 	if camera == null:
 		push_error("Camera path is broken. Fix camera_path in Inspector.")
@@ -73,11 +69,16 @@ func _process(delta: float) -> void:
 
 	# move weapon and straighten rotation when ADS
 	if Input.is_action_pressed("aim"):
-		position = position.lerp(Vector3(0.0, 0.06, -0.5), delta * ads_speed)
-		rotation = rotation.lerp(Vector3(0.0, 0.0, 0.0), delta * ads_speed)
+		position = position.lerp(Vector3(-0.11, 0.06, -0.5), delta * ads_speed)
+		var target_rot = Vector3(0.0, deg_to_rad(-5.0), 0.0)
+		rotation.x = lerp(rotation.x, target_rot.x, delta * ads_speed * 3.0)
+		rotation.y = lerp(rotation.y, target_rot.y, delta * ads_speed * 3.0)
+		rotation.z = lerp(rotation.z, target_rot.z, delta * ads_speed * 3.0)
 	else:
 		position = position.lerp(Vector3(0.2, -0.2, -0.5), delta * ads_speed)
-		rotation = rotation.lerp(hip_rotation, delta * ads_speed)
+		rotation.x = lerp(rotation.x, hip_rotation.x, delta * ads_speed)
+		rotation.y = lerp(rotation.y, hip_rotation.y, delta * ads_speed)
+		rotation.z = lerp(rotation.z, hip_rotation.z, delta * ads_speed)
 
 func shoot() -> void:
 	if current_ammo <= 0:
@@ -90,9 +91,6 @@ func shoot() -> void:
 	can_shoot = false
 	current_ammo -= 1
 	shoot_cooldown = fire_rate
-	muzzle_flash.visible = true
-	muzzle_light.visible = true
-	get_tree().create_timer(0.05).timeout.connect(func(): muzzle_flash.visible = false; muzzle_light.visible = false)
 
 	# raycast from camera center to find what crosshair is pointing at
 	var cam_dir = -camera.global_transform.basis.z
@@ -105,8 +103,13 @@ func shoot() -> void:
 	var result = space.intersect_ray(query)
 	var target_point = result.position if result else ray_to
 
-	# aim from muzzle toward exact crosshair hit point
-	var direction = (target_point - muzzle.global_position).normalized()
+	# when ADS shoot perfectly straight
+	# when hipfiring aim from muzzle toward crosshair point
+	var direction: Vector3
+	if Input.is_action_pressed("aim"):
+		direction = -camera.global_transform.basis.z
+	else:
+		direction = (target_point - muzzle.global_position).normalized()
 
 	# apply spread
 	var spread_amount = ads_spread if Input.is_action_pressed("aim") else bullet_spread
@@ -122,6 +125,7 @@ func shoot() -> void:
 	direction.z += randf_range(-spread_amount, spread_amount)
 	direction = direction.normalized()
 
+	# always spawn visually from the muzzle
 	var bullet = bullet_scene.instantiate()
 	bullet.launch(muzzle.global_position, direction, player)
 	get_tree().root.add_child(bullet)

@@ -11,7 +11,6 @@ class_name Bullet
 @export var lifetime: float = 3.0
 @export var impact_scene: PackedScene
 @export var arm_distance: float = 0.1
-
 var shooter: Node = null
 var direction: Vector3 = Vector3.ZERO
 var _origin: Vector3 = Vector3.ZERO
@@ -35,6 +34,7 @@ func _ready() -> void:
 	freeze = false
 	mass = 0.001
 	continuous_cd = true
+	collision_mask |= 1 << 19  # also detect the enemy's Facebox (layer 20)
 	global_position = _origin
 	linear_velocity = direction * speed
 	if shooter:

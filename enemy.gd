@@ -8,6 +8,14 @@ var wobble_time := 0.0
 @export var wobble_amount := 0.12
 @onready var mesh: MeshInstance3D = $MeshInstance3D
 var mesh_base_y := 0.0
+var face_mesh_base_y := 0.0
+
+# =========================
+# FACE BOX
+# =========================
+const FACEBOX_LAYER := 20
+@onready var face_mesh: MeshInstance3D = $Facebox/MeshInstance3D
+var face_original_material: Material = null
 
 # =========================
 # STATS
@@ -67,7 +75,9 @@ func _ready() -> void:
 	if player == null:
 		push_error("Enemy could not find player. Make sure Player is in group 'player'.")
 	mesh_base_y = mesh.position.y
+	face_mesh_base_y = face_mesh.position.y
 	original_material = mesh.get_active_material(0)
+	face_original_material = face_mesh.get_active_material(0)
 	flash_material = StandardMaterial3D.new()
 	flash_material.albedo_color = Color.RED
 	flash_material.emission_enabled = true
@@ -75,6 +85,10 @@ func _ready() -> void:
 	flash_material.emission_energy_multiplier = 2.0
 	spawn_position = global_position
 	spawn_rotation = rotation
+
+	if $Facebox:
+		$Facebox.collision_layer = 1 << (FACEBOX_LAYER - 1)
+		$Facebox.collision_mask = 0
 
 func _physics_process(delta: float) -> void:
 	if player == null:
@@ -108,6 +122,7 @@ func _physics_process(delta: float) -> void:
 		if flash_timer <= 0.0:
 			is_flashing = false
 			mesh.set_surface_override_material(0, original_material)
+			face_mesh.set_surface_override_material(0, face_original_material)
 
 	_apply_wobble(delta)
 	move_and_slide()
@@ -147,6 +162,7 @@ func _raycast_clear(target: Vector3) -> bool:
 		target + Vector3.UP * 0.5
 	)
 	query.exclude = [self]
+	query.collision_mask = 0xFFFFFFFF & ~(1 << (FACEBOX_LAYER - 1))
 	var result = space.intersect_ray(query)
 	if result.is_empty():
 		return true
@@ -173,10 +189,13 @@ func _apply_wobble(delta: float) -> void:
 	var moving = Vector2(velocity.x, velocity.z).length() > 0.5
 	if moving:
 		wobble_time += delta * wobble_speed
-		mesh.position.y = mesh_base_y + sin(wobble_time) * wobble_amount
+		var offset = sin(wobble_time) * wobble_amount
+		mesh.position.y = mesh_base_y + offset
+		face_mesh.position.y = face_mesh_base_y + offset
 	else:
 		wobble_time = 0.0
 		mesh.position.y = lerp(mesh.position.y, mesh_base_y, 10.0 * delta)
+		face_mesh.position.y = lerp(face_mesh.position.y, face_mesh_base_y, 10.0 * delta)
 
 # =========================
 # HEALTH / DAMAGE
@@ -193,6 +212,7 @@ func _start_flash() -> void:
 	is_flashing = true
 	flash_timer = flash_duration
 	mesh.set_surface_override_material(0, flash_material)
+	face_mesh.set_surface_override_material(0, flash_material)
 
 # =========================
 # DEATH
@@ -220,6 +240,13 @@ func die() -> void:
 	rb.add_child(rb_col)
 	rb.mass = 5.0
 
+	# carry the face box mesh over onto the ragdoll, keeping its relative position
+	var face_rb_mesh = MeshInstance3D.new()
+	face_rb_mesh.mesh = face_mesh.mesh
+	face_rb_mesh.set_surface_override_material(0, death_material)
+	rb.add_child(face_rb_mesh)
+	face_rb_mesh.transform = $Facebox.transform * face_mesh.transform
+
 	get_tree().current_scene.add_child(rb)
 	rb.global_position = global_position
 	rb.global_rotation = global_rotation
@@ -227,6 +254,7 @@ func die() -> void:
 	rb.apply_torque_impulse(Vector3(randf_range(-2.0, 2.0), 0, randf_range(-2.0, 2.0)))
 
 	mesh.visible = false
+	face_mesh.visible = false
 	_death_rb = rb
 
 	await get_tree().create_timer(death_fade_delay).timeout
@@ -259,6 +287,9 @@ func _respawn() -> void:
 
 	$CollisionShape3D.set_deferred("disabled", false)
 	mesh.visible = true
+	face_mesh.visible = true
 	mesh.rotation = Vector3.ZERO
 	mesh.position.y = mesh_base_y
+	face_mesh.position.y = face_mesh_base_y
 	mesh.set_surface_override_material(0, original_material)
+	face_mesh.set_surface_override_material(0, face_original_material)

@@ -208,9 +208,17 @@ func _physics_process(delta: float) -> void:
 			global_position + Vector3.DOWN * 0.3 + (-get_wall_normal()) * 0.6
 		)
 		ray_waist.exclude = [self]
-		var hit_center = not space_state.intersect_ray(ray).is_empty()
-		var hit_chest = not space_state.intersect_ray(ray_chest).is_empty()
-		var hit_waist = not space_state.intersect_ray(ray_waist).is_empty()
+
+		var result_center = space_state.intersect_ray(ray)
+		var result_chest = space_state.intersect_ray(ray_chest)
+		var result_waist = space_state.intersect_ray(ray_waist)
+
+		print("center: ", result_center.get("collider"), " chest: ", result_chest.get("collider"), " waist: ", result_waist.get("collider"))
+
+		var hit_center = not result_center.is_empty() and not (result_center.collider and result_center.collider.is_in_group("enemy"))
+		var hit_chest = not result_chest.is_empty() and not (result_chest.collider and result_chest.collider.is_in_group("enemy"))
+		var hit_waist = not result_waist.is_empty() and not (result_waist.collider and result_waist.collider.is_in_group("enemy"))
+
 		var hits = int(hit_center) + int(hit_chest) + int(hit_waist)
 		if hits >= 2:
 			is_wall_clinging = true
