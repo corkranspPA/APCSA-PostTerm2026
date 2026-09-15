@@ -6,6 +6,7 @@
 [ext_resource type="Texture2D" uid="uid://blg8updhrtu4r" path="res://stone road.jpeg" id="3_h2yge"]
 [ext_resource type="Script" uid="uid://ly8por15wthv" path="res://fps_shooter.gd" id="4_7mycd"]
 [ext_resource type="PackedScene" uid="uid://ctp0o18g7yp8p" path="res://Bullet.tscn" id="5_272bh"]
+[ext_resource type="Shader" uid="uid://bihpdv7a3qjbu" path="res://main.gdshader" id="5_kek77"]
 [ext_resource type="PackedScene" uid="uid://2oqfqxx5b61g" path="res://Enemy.tscn" id="7_272bh"]
 [ext_resource type="Script" uid="uid://ba78l2d86fryr" path="res://crosshair.gd" id="8_5vw27"]
 
@@ -23,6 +24,17 @@ tonemap_mode = 3
 
 [sub_resource type="BoxMesh" id="BoxMesh_7mycd"]
 size = Vector3(0.1, 0.1, 0.4)
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_5vw27"]
+shader = ExtResource("5_kek77")
+shader_parameter/squint = 0.0
+shader_parameter/base_radius = 1.05
+shader_parameter/squint_min_radius = 0.4
+shader_parameter/vignette_softness = 0.55
+shader_parameter/base_intensity = 1.0
+shader_parameter/squint_intensity = 3.0
+shader_parameter/vignette_color = Color(0, 0, 0, 1)
+shader_parameter/squint_tint_color = Color(0.35, 0.05, 0.04, 1)
 
 [sub_resource type="NavigationMesh" id="NavigationMesh_7mycd"]
 
@@ -91,6 +103,18 @@ mesh = SubResource("BoxMesh_7mycd")
 
 [node name="muzzlePoint" type="Marker3D" parent="Player/Head/Camera3D/weapon" unique_id=635041625]
 transform = Transform3D(0.9957086, 0.0032642588, 0.092487186, -0.0034821916, 0.9999915, 0.0021950384, -0.09247925, -0.0025077024, 0.9957115, 0.07838166, -0.203614, -0.3730303)
+
+[node name="CanvasLayer" type="CanvasLayer" parent="Player" unique_id=108049197]
+
+[node name="ColorRect" type="ColorRect" parent="Player/CanvasLayer" unique_id=768233073]
+unique_name_in_owner = true
+material = SubResource("ShaderMaterial_5vw27")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
 
 [node name="NavigationRegion3D" type="NavigationRegion3D" parent="." unique_id=193481439 groups=["player", "source geometry"]]
 navigation_mesh = SubResource("NavigationMesh_7mycd")
