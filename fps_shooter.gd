@@ -67,6 +67,10 @@ func _process(delta: float) -> void:
 	if Input.is_action_just_pressed("reload"):
 		reload()
 
+	# Keep the player's squint vignette in sync with whether we're actually aiming.
+	if player:
+		player.is_zooming = Input.is_action_pressed("aim")
+
 	# move weapon and straighten rotation when ADS
 	if Input.is_action_pressed("aim"):
 		position = position.lerp(Vector3(-0.11, 0.06, -0.5), delta * ads_speed)

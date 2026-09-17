@@ -83,9 +83,9 @@ var slide_speed := 0.0
 # FOV SYSTEM
 # -------------------------
 @export var normal_fov := 75.0
-@export var sprint_fov := 105.0
-@export var slide_fov := 110.0
-@export var dash_fov := 100.0
+@export var sprint_fov := 105.0     # widens while sprinting for a sense of speed
+@export var slide_fov := 110.0      # widens further while sliding
+@export var dash_fov := 100.0       # dash also widens briefly for a burst-of-speed feel
 @export var fov_speed := 9.0
 
 var current_fov := 75.0
@@ -157,6 +157,11 @@ var wall_cling_normal := Vector3.ZERO
 @export var squint_extra_when_exhausted := 0.2  # extra squint added as stamina bottoms out
 @export var squint_slide_boost := 0.35  # extra squint added while sliding, on top of speed
 @export var squint_crouch_boost := 0.12  # slight extra squint while crouched (not sliding)
+@export var squint_zoom_boost := 0.3    # extra squint while aiming/zoomed in (ADS)
+
+# Set true/false by the weapon script whenever ADS starts/stops (see weapon's _process,
+# which already checks Input.is_action_pressed("aim")).
+var is_zooming := false
 
 # Point this at your ColorRect overlay in the editor (or set it in _ready()).
 # Give the ColorRect a Unique Name (%EyelidOverlay) in your scene, or fix this path.
@@ -212,6 +217,8 @@ func _process(delta: float) -> void:
 			target_squint += squint_slide_boost
 		elif is_crouching:
 			target_squint += squint_crouch_boost
+		if is_zooming:
+			target_squint += squint_zoom_boost
 		target_squint = clampf(target_squint, 0.0, 1.0)
 
 		current_squint = lerp(current_squint, target_squint, squint_smoothing * delta)
@@ -568,6 +575,11 @@ func can_stand_up() -> bool:
 # FOV
 # -------------------------
 func update_fov(delta: float) -> void:
+	# While aiming, the weapon script (handle_ads) owns camera.fov directly —
+	# don't fight it here.
+	if is_zooming:
+		return
+
 	var target = normal_fov
 
 	var sprint_multiplier := 1.6 if is_sprinting else 1.0
@@ -577,7 +589,9 @@ func update_fov(delta: float) -> void:
 	elif is_wall_clinging:
 		target = wall_cling_fov
 	elif is_sliding:
-		target = slide_fov
+		# Slide widens further than sprint, scaled by how fast the slide still is.
+		var slide_amount := clampf(slide_speed / slide_base_speed, 0.0, 1.0)
+		target = lerp(normal_fov, slide_fov, slide_amount)
 	elif is_sprinting:
 		# FOV widens in step with the sprint ramp-up, not instantly
 		target = lerp(normal_fov, sprint_fov, sprint_ramp)

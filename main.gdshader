@@ -6,19 +6,20 @@ uniform float squint : hint_range(0.0, 1.0) = 0.0;
 
 // Vignette radius (distance from center where darkening begins) at rest.
 // Larger = only the far corners darken, like a normal photo vignette.
-uniform float base_radius : hint_range(0.3, 1.5) = 1.05;
+uniform float base_radius : hint_range(0.3, 1.5) = 0.85;
 
 // Vignette radius at full squint (max speed). Smaller = tighter tunnel vision.
-uniform float squint_min_radius : hint_range(0.05, 0.8) = 0.4;
+uniform float squint_min_radius : hint_range(0.05, 0.8) = 0.18;
 
 // How soft/blurred the transition edge is. Higher = more gradual, photographic falloff.
 uniform float vignette_softness : hint_range(0.05, 1.0) = 0.55;
 
 // How dark the vignette is at rest (0 = invisible, 1 = fully opaque at the edge).
-uniform float base_intensity : hint_range(0.0, 3.0) = 1.0;
+uniform float base_intensity : hint_range(0.0, 1.0) = 0.5;
 
-// How dark it gets at full squint/speed.
-uniform float squint_intensity : hint_range(0.0, 3.0) = 3.0;
+// How dark it gets at full squint/speed. Capped below 1.0 so the center always
+// stays at least partially visible, even at max squint.
+uniform float squint_intensity : hint_range(0.0, 1.0) = 0.85;
 
 // Vignette color at rest — typically near-black for a classic photo vignette.
 uniform vec4 vignette_color : source_color = vec4(0.0, 0.0, 0.0, 1.0);
