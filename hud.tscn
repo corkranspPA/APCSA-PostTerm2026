@@ -1,0 +1,66 @@
+[gd_scene format=3 uid="uid://bedx1j3hu5jxc"]
+
+[ext_resource type="Texture2D" uid="uid://dqid7crofgdt5" path="res://layer_stamina_256.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://bk7f5s7qp8c1v" path="res://layer_stamina_dim_256.png" id="3"]
+[ext_resource type="Texture2D" uid="uid://cg526fw2qb4hk" path="res://layer_shield_256.png" id="4"]
+[ext_resource type="Texture2D" uid="uid://dkms6e5r5a8bn" path="res://layer_shield_dim_256.png" id="5"]
+[ext_resource type="Texture2D" uid="uid://dukgjdicck8u5" path="res://layer_health_256.png" id="6"]
+[ext_resource type="Texture2D" uid="uid://bbooc3k312mco" path="res://layer_health_dim_256.png" id="7"]
+[ext_resource type="Texture2D" uid="uid://colih1bgw2q6" path="res://layer_outline_256.png" id="8"]
+
+[node name="HUD" type="Control" unique_id=652414977]
+layout_mode = 3
+anchors_preset = 0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 276.0
+offset_bottom = 276.0
+mouse_filter = 2
+
+[node name="StaminaGauge" type="TextureProgressBar" parent="." unique_id=533830113]
+layout_mode = 0
+offset_left = -5.0
+offset_top = -224.0
+offset_right = 251.0
+offset_bottom = 32.0
+scale = Vector2(2.4609303, 2.9751134)
+max_value = 10.0
+value = 10.0
+fill_mode = 3
+texture_under = ExtResource("3")
+texture_progress = ExtResource("2")
+
+[node name="ShieldGauge" type="TextureProgressBar" parent="." unique_id=1357804790]
+layout_mode = 0
+offset_left = -5.0
+offset_top = -224.0
+offset_right = 251.0
+offset_bottom = 32.0
+scale = Vector2(2.4609303, 2.9751134)
+max_value = 50.0
+value = 50.0
+fill_mode = 3
+texture_under = ExtResource("5")
+texture_progress = ExtResource("4")
+
+[node name="HealthGauge" type="TextureProgressBar" parent="." unique_id=43901118]
+layout_mode = 0
+offset_left = -5.0
+offset_top = -224.0
+offset_right = 251.0
+offset_bottom = 32.0
+scale = Vector2(2.4609303, 2.9751134)
+value = 100.0
+fill_mode = 3
+texture_under = ExtResource("7")
+texture_progress = ExtResource("6")
+
+[node name="Outline" type="TextureRect" parent="." unique_id=1502034157]
+layout_mode = 0
+offset_left = -5.0
+offset_top = -224.0
+offset_right = 251.0
+offset_bottom = 32.0
+scale = Vector2(2.4609303, 2.9751134)
+mouse_filter = 2
+texture = ExtResource("8")

@@ -7,8 +7,10 @@
 [ext_resource type="Script" uid="uid://ly8por15wthv" path="res://fps_shooter.gd" id="4_7mycd"]
 [ext_resource type="PackedScene" uid="uid://ctp0o18g7yp8p" path="res://Bullet.tscn" id="5_272bh"]
 [ext_resource type="Shader" uid="uid://bihpdv7a3qjbu" path="res://main.gdshader" id="5_kek77"]
+[ext_resource type="PackedScene" uid="uid://bedx1j3hu5jxc" path="res://hud.tscn" id="6_4c57u"]
 [ext_resource type="PackedScene" uid="uid://2oqfqxx5b61g" path="res://Enemy.tscn" id="7_272bh"]
 [ext_resource type="Script" uid="uid://ba78l2d86fryr" path="res://crosshair.gd" id="8_5vw27"]
+[ext_resource type="Script" uid="uid://bo6n1i5qobckv" path="res://hud.gd" id="11_efxa6"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
 
@@ -184,3 +186,6 @@ offset_left = 6.0
 offset_top = -1.0
 offset_right = 14.0
 offset_bottom = 1.0
+
+[node name="HUD" parent="." unique_id=652414977 instance=ExtResource("6_4c57u")]
+script = ExtResource("11_efxa6")

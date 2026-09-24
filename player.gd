@@ -41,6 +41,32 @@ var stamina := 10.0
 var stamina_regen_timer := 0.0
 
 # -------------------------
+# HEALTH (red) / SHIELD (blue)
+# -------------------------
+@export var max_health := 100.0
+@export var health_regen_rate := 0.0         # per second once regen delay passes (0 = off, rely on shield + pickups)
+@export var health_regen_delay := 4.0        # seconds after last hit before health can start regenerating
+@export var invuln_time := 0.4               # brief invulnerability window right after a hit
+
+@export var max_shield := 50.0
+@export var shield_regen_rate := 8.0         # per second once regen delay passes
+@export var shield_regen_delay := 3.0        # seconds after last hit before shield starts regenerating
+
+var health := 100.0
+var health_regen_timer := 0.0
+var invuln_timer := 0.0
+
+var shield := 50.0
+var shield_regen_timer := 0.0
+
+var is_dead := false
+
+# Emitted whenever health/shield/stamina change, so the HUD can just connect
+# once and read player.health / player.shield / player.stamina.
+signal stats_changed
+signal died
+
+# -------------------------
 # JUMP BOOST SYSTEM
 # -------------------------
 @export var sprint_jump_boost := 1.35
@@ -99,7 +125,7 @@ var current_fov := 75.0
 @onready var head: Node3D = $Head
 @onready var camera: Camera3D = $Head/Camera3D
 @onready var collision: CollisionShape3D = $CollisionShape3D
-@onready var Weapon = $Head/Camera3D/Weapon  # adjust this path to match your scene tree
+@onready var Weapon = $Head/Camera3D/weapon  # matches the lowercase "weapon" node in the scene tree
 
 var pitch := 0.0
 var mouse_captured := true
@@ -158,6 +184,7 @@ var wall_cling_normal := Vector3.ZERO
 @export var squint_slide_boost := 0.35  # extra squint added while sliding, on top of speed
 @export var squint_crouch_boost := 0.12  # slight extra squint while crouched (not sliding)
 @export var squint_zoom_boost := 0.3    # extra squint while aiming/zoomed in (ADS)
+@export var squint_low_health_boost := 0.3  # extra squint as health bottoms out (panic/pain vignette)
 
 # Set true/false by the weapon script whenever ADS starts/stops (see weapon's _process,
 # which already checks Input.is_action_pressed("aim")).
@@ -187,6 +214,8 @@ func _ready() -> void:
 	base_camera_pos = camera.position
 
 	stamina = max_stamina
+	health = max_health
+	shield = max_shield
 
 	# ---- NEW: give the weapon a reference to this player ----
 	if Weapon:
@@ -204,15 +233,17 @@ func _input(event: InputEvent) -> void:
 func _process(delta: float) -> void:
 	if eyelid_overlay and eyelid_overlay.material:
 		var fatigue := 1.0 - clampf(stamina / max_stamina, 0.0, 1.0)
+		var hurt := 1.0 - clampf(health / max_health, 0.0, 1.0)
 
 		# How fast you're actually moving right now, 0..1 relative to squint_speed_ref.
 		var horizontal_speed := Vector2(velocity.x, velocity.z).length()
 		var speed_ratio := clampf(horizontal_speed / squint_speed_ref, 0.0, 1.0)
 
-		# Always-on resting pull, plus more the faster you're actually going, plus fatigue.
+		# Always-on resting pull, plus more the faster you're actually going, plus fatigue and pain.
 		var target_squint := base_squint_amount \
 			+ speed_ratio * (1.0 - base_squint_amount) \
-			+ fatigue * squint_extra_when_exhausted
+			+ fatigue * squint_extra_when_exhausted \
+			+ hurt * squint_low_health_boost
 		if is_sliding:
 			target_squint += squint_slide_boost
 		elif is_crouching:
@@ -237,6 +268,8 @@ func _unhandled_input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 
 	dash_cooldown_timer = max(dash_cooldown_timer - delta, 0.0)
+
+	update_health_and_shield(delta)
 
 	if is_sliding:
 		is_crouching = true
@@ -328,10 +361,14 @@ func _physics_process(delta: float) -> void:
 	if actively_sprinting:
 		stamina = max(stamina - stamina_drain_rate * delta, 0.0)
 		stamina_regen_timer = stamina_regen_delay
+		stats_changed.emit()
 	else:
 		stamina_regen_timer = max(stamina_regen_timer - delta, 0.0)
 		if stamina_regen_timer <= 0.0:
+			var prev_stamina := stamina
 			stamina = min(stamina + stamina_regen_rate * delta, max_stamina)
+			if stamina != prev_stamina:
+				stats_changed.emit()
 
 	if is_dashing:
 		dash_timer -= delta
@@ -513,6 +550,78 @@ func _physics_process(delta: float) -> void:
 	update_fov(delta)
 	update_camera_tilt(delta)
 	apply_headbob(delta)
+
+
+# -------------------------
+# HEALTH / SHIELD
+# -------------------------
+
+## Matches the signature bullet.gd already calls on enemies:
+## body.take_damage(dmg, hit_point, shooter) — so bullet.gd needs NO changes
+## to also damage the player. Shield absorbs first, then health.
+func take_damage(amount: float, hit_point: Vector3 = Vector3.ZERO, shooter: Node = null) -> void:
+	if is_dead or amount <= 0.0 or invuln_timer > 0.0:
+		return
+
+	var remaining := amount
+
+	if shield > 0.0:
+		var absorbed: float = min(shield, remaining)
+		shield -= absorbed
+		remaining -= absorbed
+
+	if remaining > 0.0:
+		health = max(health - remaining, 0.0)
+
+	shield_regen_timer = shield_regen_delay
+	health_regen_timer = health_regen_delay
+	invuln_timer = invuln_time
+
+	stats_changed.emit()
+
+	if health <= 0.0 and not is_dead:
+		is_dead = true
+		died.emit()
+
+
+## Call for healing pickups — only restores health, not shield.
+func heal(amount: float) -> void:
+	if amount <= 0.0:
+		return
+	health = min(health + amount, max_health)
+	stats_changed.emit()
+
+
+## Call for shield pickups — instant restore, separate from passive regen.
+func add_shield(amount: float) -> void:
+	if amount <= 0.0:
+		return
+	shield = min(shield + amount, max_shield)
+	stats_changed.emit()
+
+
+func update_health_and_shield(delta: float) -> void:
+	if is_dead:
+		return
+
+	invuln_timer = max(invuln_timer - delta, 0.0)
+
+	var changed := false
+
+	# Shield regenerates on its own delay/rate once out of combat.
+	shield_regen_timer = max(shield_regen_timer - delta, 0.0)
+	if shield_regen_timer <= 0.0 and shield < max_shield:
+		shield = min(shield + shield_regen_rate * delta, max_shield)
+		changed = true
+
+	# Health only regens if health_regen_rate > 0 (off by default).
+	health_regen_timer = max(health_regen_timer - delta, 0.0)
+	if health_regen_rate > 0.0 and health_regen_timer <= 0.0 and health < max_health:
+		health = min(health + health_regen_rate * delta, max_health)
+		changed = true
+
+	if changed:
+		stats_changed.emit()
 
 
 # -------------------------
