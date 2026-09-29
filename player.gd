@@ -1,7 +1,7 @@
 extends CharacterBody3D
 
-@export var speed := 6.0            # brisk walking pace, m/s
-@export var sprint_speed := 9.5     # top sustained sprint, m/s
+@export var speed := 7.0            # brisk walking pace, m/s
+@export var sprint_speed := 11.5    # top sustained sprint, m/s
 @export var crouch_speed := 2.6     # crouched movement speed, m/s
 
 @export var jump_velocity := 4.5
@@ -9,15 +9,16 @@ extends CharacterBody3D
 @export var crouch_lerp_speed := 10.0
 
 # -------------------------
-# REALISTIC GROUND MOVEMENT
+# GROUND / AIR MOVEMENT (snappy, ULTRAKILL-ish)
 # -------------------------
-@export var ground_accel := 32.0          # how quickly velocity ramps toward target speed
-@export var ground_decel := 36.0          # how quickly velocity bleeds off when stopping/turning
-@export var air_accel := 7.0              # (kept modest so air control still feels floaty/arcadey if you use it)
+@export var ground_accel := 60.0          # how quickly velocity ramps toward target speed
+@export var ground_decel := 55.0          # how quickly velocity bleeds off when stopping/turning
+@export var air_accel := 16.0             # air strafing / air control
+@export var fall_gravity_mult := 1.35     # heavier fall than rise = snappier jumps
 
-@export var sprint_ramp_time := 0.35      # seconds to build up from standstill to full sprint speed
-@export var backpedal_speed_mult := 0.6   # running backwards is slower than forward
-@export var strafe_speed_mult := 0.8      # side-stepping is slower than a straight sprint
+@export var sprint_ramp_time := 0.25      # seconds to build up from standstill to full sprint speed
+@export var backpedal_speed_mult := 0.75  # running backwards is slower than forward
+@export var strafe_speed_mult := 0.9      # side-stepping is slower than a straight sprint
 
 @export var uphill_slowdown_strength := 0.5    # 0 = no effect, 1 = strong slowdown running uphill
 @export var downhill_speedup_strength := 0.3   # 0 = no effect, 1 = strong speedup running downhill
@@ -51,6 +52,7 @@ var stamina_regen_timer := 0.0
 @export var max_shield := 50.0
 @export var shield_regen_rate := 8.0         # per second once regen delay passes
 @export var shield_regen_delay := 3.0        # seconds after last hit before shield starts regenerating
+@export var shield_break_extra_delay := 2.0  # EXTRA wait before regen if a hit fully breaks the shield
 
 var health := 100.0
 var health_regen_timer := 0.0
@@ -65,6 +67,7 @@ var is_dead := false
 # once and read player.health / player.shield / player.stamina.
 signal stats_changed
 signal died
+signal shield_broken   # shield just hit zero from a hit (good hook for a sound / screen flash)
 
 # -------------------------
 # JUMP BOOST SYSTEM
@@ -80,16 +83,33 @@ signal died
 @export var slide_exit_speed_boost := 1.25
 
 # -------------------------
-# DASH SYSTEM (NEW)
+# DASH SYSTEM (multiple charges, i-frames, keeps momentum)
 # -------------------------
-@export var dash_speed := 18.0
+@export var dash_speed := 20.0
 @export var dash_duration := 0.15
-@export var dash_cooldown := 0.8
+@export var dash_cooldown := 0.2            # short delay between back-to-back dashes
+@export var max_dash_charges := 3
+@export var dash_recharge_time := 1.1       # seconds to regain one charge
+@export var dash_exit_momentum := 0.55      # fraction of dash speed kept when the dash ends
+@export var dash_grants_iframes := true     # can't be hurt mid-dash
 
 var is_dashing := false
 var dash_timer := 0.0
 var dash_cooldown_timer := 0.0
 var dash_direction := Vector3.ZERO
+var dash_charges := 3
+var dash_recharge_timer := 0.0
+
+# -------------------------
+# GROUND SLAM (press crouch in the air)
+# -------------------------
+@export var slam_speed := 42.0
+@export var slam_air_drag := 25.0            # how fast sideways speed dies while slamming
+@export var slam_damage := 60.0
+@export var slam_radius := 6.0
+@export var slam_bounce_velocity := 11.0     # hold jump on landing for a big bounce
+
+var is_slamming := false
 
 # -------------------------
 # SLIDE SYSTEM
@@ -99,11 +119,17 @@ var dash_direction := Vector3.ZERO
 @export var slide_friction := 4.5
 @export var slide_burst := 1.6
 @export var slope_slide_boost := 2.2
+@export var slide_from_walk := true          # crouch while moving fast enough slides even if not sprinting
 
 var is_sliding := false
 var slide_timer := 0.0
 var slide_direction := Vector3.ZERO
 var slide_speed := 0.0
+
+# -------------------------
+# KNOCKBACK (from enemy hits)
+# -------------------------
+var knockback_timer := 0.0
 
 # -------------------------
 # FOV SYSTEM
@@ -112,6 +138,7 @@ var slide_speed := 0.0
 @export var sprint_fov := 105.0     # widens while sprinting for a sense of speed
 @export var slide_fov := 110.0      # widens further while sliding
 @export var dash_fov := 100.0       # dash also widens briefly for a burst-of-speed feel
+@export var slam_fov := 112.0       # slam stretches the view while diving
 @export var fov_speed := 9.0
 
 var current_fov := 75.0
@@ -178,7 +205,7 @@ var wall_cling_normal := Vector3.ZERO
 # SQUINT / EYELID VIGNETTE
 # -------------------------
 @export var base_squint_amount := 0.1   # resting vignette pull, always applied even when idle
-@export var squint_speed_ref := 9.5     # speed (m/s) that counts as "fully squinted" — match sprint_speed
+@export var squint_speed_ref := 11.5    # speed (m/s) that counts as "fully squinted" — match sprint_speed
 @export var squint_smoothing := 6.0     # higher = vignette reacts to speed changes faster
 @export var squint_extra_when_exhausted := 0.2  # extra squint added as stamina bottoms out
 @export var squint_slide_boost := 0.35  # extra squint added while sliding, on top of speed
@@ -216,8 +243,9 @@ func _ready() -> void:
 	stamina = max_stamina
 	health = max_health
 	shield = max_shield
+	dash_charges = max_dash_charges
 
-	# ---- NEW: give the weapon a reference to this player ----
+	# ---- give the weapon a reference to this player ----
 	if Weapon:
 		Weapon.player = self
 
@@ -268,6 +296,8 @@ func _unhandled_input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 
 	dash_cooldown_timer = max(dash_cooldown_timer - delta, 0.0)
+	knockback_timer = max(knockback_timer - delta, 0.0)
+	_update_dash_charges(delta)
 
 	update_health_and_shield(delta)
 
@@ -292,21 +322,27 @@ func _physics_process(delta: float) -> void:
 		"move_back"
 	)
 
-	if Input.is_action_just_pressed("dash") and dash_cooldown_timer <= 0.0:
+	if Input.is_action_just_pressed("dash") and dash_cooldown_timer <= 0.0 and dash_charges > 0:
 		start_dash()
 
+	var flat_speed := Vector2(velocity.x, velocity.z).length()
+
 	if Input.is_action_just_pressed("crouch") \
-	and is_sprinting \
 	and is_on_floor() \
 	and not is_sliding \
-	and velocity.length() > 4.0 \
-	and input_dir.y < -0.5:
+	and flat_speed > 4.0 \
+	and (is_sprinting or slide_from_walk) \
+	and input_dir.length() > 0.5:
 		start_slide()
 
 	elif Input.is_action_just_pressed("crouch") and is_on_floor() and not is_sliding:
 		is_crouching = !is_crouching
 
-	if is_on_wall() and not is_on_floor() and not is_wall_clinging and not is_sliding and velocity.y < 0.0:
+	# Crouch in mid-air = ground slam
+	if Input.is_action_just_pressed("crouch") and not is_on_floor() and not is_slamming and not is_dashing:
+		start_slam()
+
+	if is_on_wall() and not is_on_floor() and not is_wall_clinging and not is_sliding and not is_slamming and velocity.y < 0.0:
 		var space_state = get_world_3d().direct_space_state
 		var ray = PhysicsRayQueryParameters3D.create(
 			global_position,
@@ -328,8 +364,6 @@ func _physics_process(delta: float) -> void:
 		var result_chest = space_state.intersect_ray(ray_chest)
 		var result_waist = space_state.intersect_ray(ray_waist)
 
-		print("center: ", result_center.get("collider"), " chest: ", result_chest.get("collider"), " waist: ", result_waist.get("collider"))
-
 		var hit_center = not result_center.is_empty() and not (result_center.collider and result_center.collider.is_in_group("enemy"))
 		var hit_chest = not result_chest.is_empty() and not (result_chest.collider and result_chest.collider.is_in_group("enemy"))
 		var hit_waist = not result_waist.is_empty() and not (result_waist.collider and result_waist.collider.is_in_group("enemy"))
@@ -345,8 +379,13 @@ func _physics_process(delta: float) -> void:
 	if not is_on_floor():
 		if is_wall_clinging:
 			velocity = Vector3.ZERO
+		elif is_slamming:
+			pass  # slam sets its own vertical speed below
 		else:
-			velocity += get_gravity() * delta
+			var g := get_gravity() * delta
+			if velocity.y < 0.0:
+				g *= fall_gravity_mult
+			velocity += g
 
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
@@ -376,9 +415,16 @@ func _physics_process(delta: float) -> void:
 
 		if dash_timer <= 0.0:
 			is_dashing = false
+			# Keep some momentum instead of stopping dead — lets you chain dash into slide/jump.
+			velocity = dash_direction * dash_speed * dash_exit_momentum
 
 	elif is_wall_clinging:
 		velocity = Vector3.ZERO
+
+	elif is_slamming:
+		velocity.x = move_toward(velocity.x, 0.0, slam_air_drag * delta)
+		velocity.z = move_toward(velocity.z, 0.0, slam_air_drag * delta)
+		velocity.y = -slam_speed
 
 	else:
 
@@ -405,8 +451,6 @@ func _physics_process(delta: float) -> void:
 			var current_speed = speed
 
 			# Direction relative to facing: 1 = straight forward, -1 = straight backward.
-			# Now applies to walking too, not just sprinting — real people are also
-			# slower moving backward/sideways than straight ahead at any pace.
 			var move_dot := 0.0
 			if direction.length() > 0.01:
 				move_dot = direction.dot(-transform.basis.z)
@@ -433,8 +477,7 @@ func _physics_process(delta: float) -> void:
 			else:
 				current_speed = speed * dir_mult
 
-			# Slope handling: running uphill is slower, downhill is faster, like
-			# working against/with gravity. Skipped on very flat ground.
+			# Slope handling: running uphill is slower, downhill is faster.
 			if is_on_floor() and direction.length() > 0.01:
 				var floor_normal := get_floor_normal()
 				var slope_deg := rad_to_deg(acos(clampf(floor_normal.dot(Vector3.UP), -1.0, 1.0)))
@@ -449,25 +492,29 @@ func _physics_process(delta: float) -> void:
 					else:
 						current_speed *= 1.0 + (-uphill_amount) * slope_ratio * downhill_speedup_strength
 
-			# Momentum: if reversing direction sharply, brake hard first rather than
-			# instantly redirecting at full speed — avoids an "ice skating" feel.
+			# Momentum: if reversing direction sharply, brake hard first.
 			var horizontal_vel := Vector2(velocity.x, velocity.z)
 			var desired_dir2 := Vector2(direction.x, direction.z)
 			var vel_dot := 0.0
 			if horizontal_vel.length() > 0.3 and desired_dir2.length() > 0.01:
 				vel_dot = horizontal_vel.normalized().dot(desired_dir2.normalized())
 
-			# Acceleration/deceleration instead of snapping straight to target speed
+			# While being knocked back, you have much less control for a moment.
+			var control := 0.15 if knockback_timer > 0.0 else 1.0
+
 			var accel := ground_accel if is_on_floor() else air_accel
 			if vel_dot < turn_brake_dot_threshold:
 				accel = (ground_decel if is_on_floor() else air_accel) * turn_brake_mult
+			accel *= control
 
 			if direction:
 				velocity.x = move_toward(velocity.x, direction.x * current_speed, accel * delta)
 				velocity.z = move_toward(velocity.z, direction.z * current_speed, accel * delta)
 			else:
-				velocity.x = move_toward(velocity.x, 0, ground_decel * delta)
-				velocity.z = move_toward(velocity.z, 0, ground_decel * delta)
+				# In the air with no input, keep momentum (no air friction); on the ground, stop quickly.
+				if is_on_floor():
+					velocity.x = move_toward(velocity.x, 0, ground_decel * control * delta)
+					velocity.z = move_toward(velocity.z, 0, ground_decel * control * delta)
 
 	if Input.is_action_just_pressed("jump"):
 
@@ -485,7 +532,7 @@ func _physics_process(delta: float) -> void:
 				velocity.x = horiz.x
 				velocity.z = horiz.y
 
-			velocity.y = final_jump
+			velocity.y = max(velocity.y, final_jump)
 
 		elif is_wall_clinging:
 			is_wall_clinging = false
@@ -532,17 +579,21 @@ func _physics_process(delta: float) -> void:
 				velocity.z = h_vel.y
 
 		if auto_bhop and Input.is_action_pressed("jump"):
-			velocity.y = jump_velocity
+			velocity.y = max(velocity.y, jump_velocity)
 
 	was_on_floor = is_on_floor()
 
 	move_and_slide()
+
+	if is_slamming and is_on_floor():
+		_slam_impact()
 
 	if global_position.y < -20.0:
 		global_position = Vector3(0, 2, 0)
 		velocity = Vector3.ZERO
 		is_sliding = false
 		is_dashing = false
+		is_slamming = false
 		is_wall_clinging = false
 		is_crouching = false
 		is_sprinting = false
@@ -564,6 +615,7 @@ func take_damage(amount: float, hit_point: Vector3 = Vector3.ZERO, shooter: Node
 		return
 
 	var remaining := amount
+	var had_shield := shield > 0.0
 
 	if shield > 0.0:
 		var absorbed: float = min(shield, remaining)
@@ -576,6 +628,11 @@ func take_damage(amount: float, hit_point: Vector3 = Vector3.ZERO, shooter: Node
 	shield_regen_timer = shield_regen_delay
 	health_regen_timer = health_regen_delay
 	invuln_timer = invuln_time
+
+	# A hit that fully breaks the shield makes it take longer to come back.
+	if had_shield and shield <= 0.0:
+		shield_regen_timer = shield_regen_delay + shield_break_extra_delay
+		shield_broken.emit()
 
 	stats_changed.emit()
 
@@ -598,6 +655,15 @@ func add_shield(amount: float) -> void:
 		return
 	shield = min(shield + amount, max_shield)
 	stats_changed.emit()
+
+
+## Called by enemies when they land a hit. Shoves the player and briefly
+## reduces air/ground control so the hit actually feels like something.
+func apply_knockback(impulse: Vector3) -> void:
+	velocity += impulse
+	knockback_timer = 0.25
+	is_sliding = false
+	is_wall_clinging = false
 
 
 func update_health_and_shield(delta: float) -> void:
@@ -625,15 +691,37 @@ func update_health_and_shield(delta: float) -> void:
 
 
 # -------------------------
-# DASH FUNCTION
+# DASH
 # -------------------------
+func _update_dash_charges(delta: float) -> void:
+	if dash_charges < max_dash_charges:
+		dash_recharge_timer += delta
+		if dash_recharge_timer >= dash_recharge_time:
+			dash_recharge_timer = 0.0
+			dash_charges += 1
+			stats_changed.emit()
+	else:
+		dash_recharge_timer = 0.0
+
+
 func start_dash():
-	if is_crouching:
+	if is_crouching and not is_sliding:
 		return
+
+	if is_sliding:
+		stop_slide()
+
+	is_slamming = false
+	is_wall_clinging = false
 
 	is_dashing = true
 	dash_timer = dash_duration
 	dash_cooldown_timer = dash_cooldown
+	dash_charges -= 1
+	stats_changed.emit()
+
+	if dash_grants_iframes:
+		invuln_timer = max(invuln_timer, dash_duration + 0.05)
 
 	var input_dir := Input.get_vector("move_left","move_right","move_forward","move_back")
 	var dir := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
@@ -645,6 +733,35 @@ func start_dash():
 
 
 # -------------------------
+# GROUND SLAM
+# -------------------------
+func start_slam() -> void:
+	is_slamming = true
+	is_wall_clinging = false
+	is_sprinting = false
+	velocity.x *= 0.3
+	velocity.z *= 0.3
+	velocity.y = -slam_speed
+
+
+func _slam_impact() -> void:
+	is_slamming = false
+	var hit_pos := global_position
+
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if e == self or not e.has_method("take_damage"):
+			continue
+		var d: float = e.global_position.distance_to(hit_pos)
+		if d <= slam_radius:
+			var falloff := 1.0 - clampf(d / slam_radius, 0.0, 1.0) * 0.5
+			e.take_damage(slam_damage * falloff, e.global_position, self)
+
+	# Hold jump as you land for a big bounce.
+	if Input.is_action_pressed("jump"):
+		velocity.y = slam_bounce_velocity
+
+
+# -------------------------
 # SLIDE
 # -------------------------
 func start_slide():
@@ -652,8 +769,10 @@ func start_slide():
 	slide_timer = slide_duration
 	slide_speed = slide_base_speed * slide_burst
 
-	slide_direction = velocity.normalized()
-	if slide_direction.length() == 0:
+	var flat := Vector3(velocity.x, 0.0, velocity.z)
+	if flat.length() > 0.1:
+		slide_direction = flat.normalized()
+	else:
 		slide_direction = -transform.basis.z
 
 	is_crouching = true
@@ -695,6 +814,8 @@ func update_fov(delta: float) -> void:
 
 	if is_dashing:
 		target = dash_fov
+	elif is_slamming:
+		target = slam_fov
 	elif is_wall_clinging:
 		target = wall_cling_fov
 	elif is_sliding:

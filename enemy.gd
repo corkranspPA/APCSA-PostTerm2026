@@ -29,6 +29,27 @@ var face_original_material: Material = null
 @export var gravity := 9.8
 
 # =========================
+# ATTACK (telegraphed lunge)
+# =========================
+@export var attack_range := 2.6          # starts an attack when the player is this close (flat distance)
+@export var attack_windup := 0.55        # telegraph time — enemy turns orange and stops. Dodge window!
+@export var attack_lunge_speed := 16.0   # how fast the lunge is
+@export var attack_lunge_time := 0.2     # how long the lunge lasts
+@export var attack_recover := 0.6        # vulnerable recovery after the lunge
+@export var attack_cooldown := 1.2       # extra wait before it can attack again
+@export var attack_damage := 20.0
+@export var attack_hit_radius := 1.8     # how close the player must be during the lunge to get hit
+@export var attack_knockback := 9.0
+
+enum AttackPhase { NONE, WINDUP, LUNGE, RECOVER }
+var attack_phase: AttackPhase = AttackPhase.NONE
+var attack_timer := 0.0
+var attack_cooldown_timer := 0.0
+var attack_hit_landed := false
+var lunge_dir := Vector3.ZERO
+var windup_material: StandardMaterial3D = null
+
+# =========================
 # HEALTH / DAMAGE
 # =========================
 @export var max_health := 100.0
@@ -63,13 +84,16 @@ var spawn_rotation: Vector3 = Vector3.ZERO
 # =========================
 # STATE
 # =========================
-enum State { IDLE, ALERT, CHASING }
+enum State { IDLE, ALERT, CHASING, ATTACKING }
 var state: State = State.IDLE
 var player: Node3D = null
 var last_known_position: Vector3 = Vector3.ZERO
 var can_see_player := false
 
 func _ready() -> void:
+	# The player's slam + wall-cling code look for this group.
+	add_to_group("enemy")
+
 	await get_tree().process_frame
 	player = get_tree().get_first_node_in_group("player")
 	if player == null:
@@ -83,6 +107,14 @@ func _ready() -> void:
 	flash_material.emission_enabled = true
 	flash_material.emission = Color.RED
 	flash_material.emission_energy_multiplier = 2.0
+
+	# Orange glow shown during the attack wind-up so the player can read it.
+	windup_material = StandardMaterial3D.new()
+	windup_material.albedo_color = Color(1.0, 0.55, 0.05)
+	windup_material.emission_enabled = true
+	windup_material.emission = Color(1.0, 0.45, 0.0)
+	windup_material.emission_energy_multiplier = 2.5
+
 	spawn_position = global_position
 	spawn_rotation = rotation
 
@@ -96,6 +128,8 @@ func _physics_process(delta: float) -> void:
 	if is_dead:
 		_apply_fade(delta)
 		return
+
+	attack_cooldown_timer = max(attack_cooldown_timer - delta, 0.0)
 
 	if not is_on_floor():
 		velocity.y -= gravity * delta
@@ -113,16 +147,20 @@ func _physics_process(delta: float) -> void:
 		State.CHASING:
 			if can_see_player:
 				last_known_position = player.global_position
-				_move_toward(player.global_position)
+				if _flat_distance_to_player() <= attack_range and attack_cooldown_timer <= 0.0 and player.get("is_dead") != true:
+					_start_attack()
+				else:
+					_move_toward(player.global_position)
 			else:
 				state = State.ALERT
+		State.ATTACKING:
+			_process_attack(delta)
 
 	if is_flashing:
 		flash_timer -= delta
 		if flash_timer <= 0.0:
 			is_flashing = false
-			mesh.set_surface_override_material(0, original_material)
-			face_mesh.set_surface_override_material(0, face_original_material)
+			_apply_base_materials()
 
 	_apply_wobble(delta)
 	move_and_slide()
@@ -132,6 +170,9 @@ func _physics_process(delta: float) -> void:
 # =========================
 func _check_detection() -> void:
 	can_see_player = _has_line_of_sight()
+	# Once committed to an attack, don't let detection interrupt it.
+	if state == State.ATTACKING:
+		return
 	if can_see_player:
 		state = State.CHASING
 		last_known_position = player.global_position
@@ -182,6 +223,105 @@ func _move_toward(target: Vector3) -> void:
 		var target_basis = Basis.looking_at(flat_dir, Vector3.UP)
 		global_transform.basis = global_transform.basis.slerp(target_basis, 10.0 * get_physics_process_delta_time())
 
+func _face_position(target: Vector3, rate: float, delta: float) -> void:
+	var flat_dir = Vector3(target.x - global_position.x, 0, target.z - global_position.z)
+	if flat_dir.length() > 0.1:
+		var target_basis = Basis.looking_at(flat_dir.normalized(), Vector3.UP)
+		global_transform.basis = global_transform.basis.slerp(target_basis, clampf(rate * delta, 0.0, 1.0))
+
+func _flat_distance_to_player() -> float:
+	var d = player.global_position - global_position
+	d.y = 0
+	return d.length()
+
+# =========================
+# ATTACK
+# =========================
+func _start_attack() -> void:
+	state = State.ATTACKING
+	attack_phase = AttackPhase.WINDUP
+	attack_timer = attack_windup
+	attack_hit_landed = false
+	velocity.x = 0
+	velocity.z = 0
+	if not is_flashing:
+		_apply_base_materials()
+
+func _process_attack(delta: float) -> void:
+	match attack_phase:
+		AttackPhase.WINDUP:
+			# Stand still, track the player, glow orange.
+			velocity.x = 0
+			velocity.z = 0
+			_face_position(player.global_position, 12.0, delta)
+			attack_timer -= delta
+			if attack_timer <= 0.0:
+				# Lunge direction is locked in NOW — that's what makes it dodgeable.
+				var to_player = player.global_position - global_position
+				to_player.y = 0
+				if to_player.length() > 0.05:
+					lunge_dir = to_player.normalized()
+				else:
+					lunge_dir = -global_transform.basis.z
+				attack_phase = AttackPhase.LUNGE
+				attack_timer = attack_lunge_time
+				if not is_flashing:
+					_apply_base_materials()
+		AttackPhase.LUNGE:
+			velocity.x = lunge_dir.x * attack_lunge_speed
+			velocity.z = lunge_dir.z * attack_lunge_speed
+			if not attack_hit_landed and _player_in_hit_range():
+				_deal_attack_damage()
+			attack_timer -= delta
+			if attack_timer <= 0.0:
+				attack_phase = AttackPhase.RECOVER
+				attack_timer = attack_recover
+		AttackPhase.RECOVER:
+			velocity.x = move_toward(velocity.x, 0.0, 40.0 * delta)
+			velocity.z = move_toward(velocity.z, 0.0, 40.0 * delta)
+			attack_timer -= delta
+			if attack_timer <= 0.0:
+				_end_attack()
+
+func _player_in_hit_range() -> bool:
+	var d = player.global_position - global_position
+	if absf(d.y) > 1.8:
+		return false
+	d.y = 0
+	return d.length() <= attack_hit_radius
+
+func _deal_attack_damage() -> void:
+	# If the player is mid-dash (i-frames), the lunge whiffs — keep checking
+	# each frame in case they come out of it while still in range.
+	var inv = player.get("invuln_timer")
+	if inv != null and inv > 0.0:
+		return
+
+	attack_hit_landed = true
+	var push = player.global_position - global_position
+	push.y = 0
+	push = push.normalized()
+
+	if player.has_method("take_damage"):
+		player.take_damage(attack_damage, player.global_position, self)
+	if player.has_method("apply_knockback"):
+		player.apply_knockback(push * attack_knockback + Vector3.UP * 2.0)
+
+func _end_attack() -> void:
+	attack_phase = AttackPhase.NONE
+	attack_cooldown_timer = attack_cooldown
+	state = State.CHASING
+	if not is_flashing:
+		_apply_base_materials()
+
+func _apply_base_materials() -> void:
+	if attack_phase == AttackPhase.WINDUP and windup_material:
+		mesh.set_surface_override_material(0, windup_material)
+		face_mesh.set_surface_override_material(0, windup_material)
+	else:
+		mesh.set_surface_override_material(0, original_material)
+		face_mesh.set_surface_override_material(0, face_original_material)
+
 # =========================
 # WOBBLE
 # =========================
@@ -219,6 +359,7 @@ func _start_flash() -> void:
 # =========================
 func die() -> void:
 	is_dead = true
+	attack_phase = AttackPhase.NONE
 	velocity = Vector3.ZERO
 	$CollisionShape3D.set_deferred("disabled", true)
 
@@ -280,6 +421,8 @@ func _respawn() -> void:
 	health = max_health
 	death_timer = 0.0
 	state = State.IDLE
+	attack_phase = AttackPhase.NONE
+	attack_cooldown_timer = 0.0
 	velocity = Vector3.ZERO
 
 	global_position = spawn_position

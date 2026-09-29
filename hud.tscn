@@ -19,11 +19,11 @@ mouse_filter = 2
 
 [node name="StaminaGauge" type="TextureProgressBar" parent="." unique_id=533830113]
 layout_mode = 0
-offset_left = -5.0
-offset_top = -224.0
-offset_right = 251.0
-offset_bottom = 32.0
-scale = Vector2(2.4609303, 2.9751134)
+offset_left = 18.999998
+offset_top = -136.0
+offset_right = 275.0
+offset_bottom = 120.0
+scale = Vector2(1.7060933, 1.9669478)
 max_value = 10.0
 value = 10.0
 fill_mode = 3
@@ -32,11 +32,11 @@ texture_progress = ExtResource("2")
 
 [node name="ShieldGauge" type="TextureProgressBar" parent="." unique_id=1357804790]
 layout_mode = 0
-offset_left = -5.0
-offset_top = -224.0
-offset_right = 251.0
-offset_bottom = 32.0
-scale = Vector2(2.4609303, 2.9751134)
+offset_left = 18.999998
+offset_top = -136.0
+offset_right = 275.0
+offset_bottom = 120.0
+scale = Vector2(1.7060933, 1.9669478)
 max_value = 50.0
 value = 50.0
 fill_mode = 3
@@ -45,11 +45,11 @@ texture_progress = ExtResource("4")
 
 [node name="HealthGauge" type="TextureProgressBar" parent="." unique_id=43901118]
 layout_mode = 0
-offset_left = -5.0
-offset_top = -224.0
-offset_right = 251.0
-offset_bottom = 32.0
-scale = Vector2(2.4609303, 2.9751134)
+offset_left = 18.999998
+offset_top = -136.0
+offset_right = 275.0
+offset_bottom = 120.0
+scale = Vector2(1.7060933, 1.9669478)
 value = 100.0
 fill_mode = 3
 texture_under = ExtResource("7")
@@ -57,10 +57,10 @@ texture_progress = ExtResource("6")
 
 [node name="Outline" type="TextureRect" parent="." unique_id=1502034157]
 layout_mode = 0
-offset_left = -5.0
-offset_top = -224.0
-offset_right = 251.0
-offset_bottom = 32.0
-scale = Vector2(2.4609303, 2.9751134)
+offset_left = 18.999998
+offset_top = -136.0
+offset_right = 275.0
+offset_bottom = 120.0
+scale = Vector2(1.7060933, 1.9669478)
 mouse_filter = 2
 texture = ExtResource("8")
