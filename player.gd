@@ -13,6 +13,7 @@ extends CharacterBody3D
 # -------------------------
 @export var ground_accel := 60.0          # how quickly velocity ramps toward target speed
 @export var ground_decel := 55.0          # how quickly velocity bleeds off when stopping/turning
+@export var ground_overspeed_decel := 10.0 # how slowly extra momentum (from a jump, dash or slide) fades on the ground
 @export var air_accel := 16.0             # air strafing / air control
 @export var fall_gravity_mult := 1.35     # heavier fall than rise = snappier jumps
 
@@ -30,7 +31,7 @@ var sprint_ramp := 0.0  # 0..1, how "spooled up" the current sprint is
 # -------------------------
 # STAMINA (fatigue while sprinting)
 # -------------------------
-@export var max_stamina := 10.0
+@export var max_stamina := 15.0          # raised from 10 (with dash_stamina_cost 3 that's 5 dashes)
 @export var stamina_drain_rate := 1.0        # stamina lost per second while actively sprinting
 @export var stamina_regen_rate := 1.6        # stamina gained per second once recovering
 @export var stamina_regen_delay := 0.8       # seconds after you stop sprinting before regen kicks in
@@ -38,8 +39,17 @@ var sprint_ramp := 0.0  # 0..1, how "spooled up" the current sprint is
 @export var low_stamina_speed_mult := 0.55   # sprint speed multiplier once fully gassed
 @export var stamina_taper_ratio := 0.3       # below this fraction of max stamina, speed starts tapering
 
-var stamina := 10.0
+var stamina := 15.0
 var stamina_regen_timer := 0.0
+
+# NEW: each jump takes one chunk of stamina (nothing more is drained while you're in the air); hitting a wall gives it back.
+@export var jump_stamina_cost := 1.5          # one-time stamina taken per ground jump / bunny hop (never blocks the jump; bottoms out at 0)
+@export var wall_hit_stamina_burst := 2.0     # instant stamina gained the moment you hit a wall in the air
+@export var wall_stamina_regen_rate := 6.0    # stamina gained per second while touching / clinging to a wall
+@export var wall_hit_cooldown := 0.4          # seconds before another wall hit can give the burst again (stops wall-spam abuse)
+
+var was_wall_contact := false
+var wall_hit_cooldown_timer := 0.0
 
 # -------------------------
 # HEALTH (red) / SHIELD (blue)
@@ -63,11 +73,25 @@ var shield_regen_timer := 0.0
 
 var is_dead := false
 
+# -------------------------
+# DEATH / RESPAWN
+# -------------------------
+@export var respawn_delay := 1.5          # seconds on the death screen after dying to damage
+@export var void_respawn_delay := 0.5     # shorter wait when you fall off the map
+@export var kill_height := -20.0          # fall below this Y and you die
+@export var respawn_invuln_time := 1.5    # brief spawn protection after coming back
+
+var spawn_position := Vector3.ZERO
+var spawn_yaw := 0.0
+
 # Emitted whenever health/shield/stamina change, so the HUD can just connect
 # once and read player.health / player.shield / player.stamina.
 signal stats_changed
 signal died
 signal shield_broken   # shield just hit zero from a hit (good hook for a sound / screen flash)
+signal respawned       # fired after the player comes back to life
+signal knocked_down    # NEW: an air roll was botched and you hit the floor (hook a thud sound here)
+signal roll_wall_bounced # NEW: a roll hit a wall and kicked you off it
 
 # -------------------------
 # JUMP BOOST SYSTEM
@@ -88,17 +112,80 @@ signal shield_broken   # shield just hit zero from a hit (good hook for a sound 
 @export var dash_speed := 20.0
 @export var dash_duration := 0.15
 @export var dash_cooldown := 0.2            # short delay between back-to-back dashes
-@export var max_dash_charges := 3
-@export var dash_recharge_time := 1.1       # seconds to regain one charge
+@export var dash_stamina_cost := 3.0        # stamina spent per dash/roll (10 max = 3 dashes)
 @export var dash_exit_momentum := 0.55      # fraction of dash speed kept when the dash ends
 @export var dash_grants_iframes := true     # can't be hurt mid-dash
 
+# Dashing while crouched or sliding = a ground roll. Dashing in mid-air = an air roll (gentler, see below).
+@export var roll_speed := 10.5              # starting speed of the roll (eases out over its duration)
+@export var roll_duration := 0.75     # longer roll = slower, easier-to-watch spin
+@export var roll_exit_momentum := 0.7       # fraction of roll speed kept when it ends
+@export var roll_grants_iframes := true
+@export var roll_iframe_time := 0.3         # seconds of invulnerability at the start of a roll
+@export var roll_full_spin := true            # true = visible full camera roll; false = gentle tilt only (GROUND rolls)
+@export var roll_spin_degrees := 360.0        # how far the camera rotates during a ground roll
+@export var roll_camera_tilt_degrees := 12.0  # tilt amount used when roll_full_spin is off
+# Comfort aids while rolling: a vignette hides the fast-moving screen edges and a narrower FOV
+# reduces peripheral motion — both are well-known ways to cut motion sickness.
+@export var roll_vignette_boost := 0.5        # extra squint-vignette during a ground roll (needs the eyelid overlay)
+@export var roll_fov_change := -8.0           # FOV added during a ground roll (negative = narrower)
+
+# -------------------------
+# AIR ROLL (NEW) — easier on the eyes than the ground roll
+# -------------------------
+# Air rolls NEVER spin the camera. They just lean a few degrees into the roll and back out,
+# with almost no FOV change and only a light vignette.
+@export var air_roll_tilt_degrees := 9.0       # peak camera lean mid-roll (0 = no camera motion at all)
+@export var air_roll_fov_change := -3.0        # much smaller FOV squeeze than the ground roll
+@export var air_roll_vignette_boost := 0.15    # light vignette so the screen edges don't swim
+# If you land before the air roll is this far along (0..1), you botch it and tumble. Set to 0 to disable.
+@export var air_roll_complete_progress := 0.7
+
+# -------------------------
+# ROLL WITH THE MOVEMENT KEYS (NEW)
+# -------------------------
+# Double-tap a movement key (W/A/S/D or stick) to roll that way — no mouse, no crouch, no extra button.
+# Works on the ground and in the air. The normal dash button still works too.
+@export var roll_double_tap_enabled := true
+@export var roll_double_tap_window := 0.25    # seconds between the two taps
+@export var roll_input_buffer := 0.2          # a tap made slightly early (cooldown / mid-roll) still fires when it's allowed
+
+var last_tap_time := {}                        # action name -> time of its last fresh press
+var roll_request_pending := false
+var roll_request_dir := Vector2.ZERO           # local input direction (x = right, y = back) of the tapped key
+var roll_buffer_timer := 0.0
+
+# -------------------------
+# FAILED ROLL / KNOCKDOWN (NEW)
+# -------------------------
+@export var knockdown_duration := 0.6          # total seconds on the ground before you can act again (keep under 1s)
+@export var knockdown_friction := 14.0         # how quickly you skid to a stop while down
+@export var knockdown_camera_tilt_degrees := 14.0
+@export var knockdown_camera_drop := 0.3       # extra camera height lost while down (rises back up as you get up)
+
+# -------------------------
+# ROLL INTO WALL = WALL BOUNCE (NEW)
+# -------------------------
+@export var roll_wall_bounce := true
+@export var roll_wall_bounce_speed_mult := 1.0       # how much of the roll's speed carries into the bounce
+@export var roll_wall_bounce_up_mult := 0.75         # scales the normal wall-jump height (1.0 = same as a wall jump)
+@export var roll_wall_bounce_stamina_refund := 1.5   # stamina given back so you can chain into another dash
+@export var roll_wall_bounce_min_dot := 0.35         # how head-on the roll must be (0 = any touch, 1 = perfectly head-on)
+
 var is_dashing := false
+var is_rolling := false                     # true while a crouched dash (roll) is happening
+var roll_is_air := false                    # NEW: this roll was started in mid-air
+var roll_progress := 0.0                    # 0..1 through the current roll (drives the camera spin)
+var roll_current_speed := 0.0               # speed of the current roll (never slower than the speed you started it at)
 var dash_timer := 0.0
 var dash_cooldown_timer := 0.0
 var dash_direction := Vector3.ZERO
-var dash_charges := 3
-var dash_recharge_timer := 0.0
+
+# NEW: knockdown state. Weapon scripts can check player.is_knocked_down to block shooting while down.
+var is_knocked_down := false
+var knockdown_timer := 0.0
+var knockdown_tilt_sign := 1.0
+var restore_camera_pitch := false
 
 # -------------------------
 # GROUND SLAM (press crouch in the air)
@@ -173,6 +260,7 @@ var headspace_check_distance := 0.6
 # -------------------------
 var bob_time := 0.0
 var base_camera_pos := Vector3.ZERO
+var base_camera_rot_x := 0.0
 
 @export var walk_bob_speed := 8.0
 @export var sprint_bob_speed := 13.0
@@ -239,11 +327,15 @@ func _ready() -> void:
 	crouch_cam_y = stand_cam_y - 0.8
 
 	base_camera_pos = camera.position
+	base_camera_rot_x = camera.rotation.x
 
 	stamina = max_stamina
 	health = max_health
 	shield = max_shield
-	dash_charges = max_dash_charges
+
+	# Wherever the player is placed in the scene is where they respawn.
+	spawn_position = global_position
+	spawn_yaw = rotation.y
 
 	# ---- give the weapon a reference to this player ----
 	if Weapon:
@@ -251,6 +343,26 @@ func _ready() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# NEW: double-tap a movement key = roll in that direction.
+	if roll_double_tap_enabled and not is_dead and not event.is_echo():
+		var tap_dirs := {
+			"move_left": Vector2(-1, 0),
+			"move_right": Vector2(1, 0),
+			"move_forward": Vector2(0, -1),
+			"move_back": Vector2(0, 1),
+		}
+		for action in tap_dirs:
+			if event.is_action_pressed(action):
+				var now := Time.get_ticks_msec() / 1000.0
+				if last_tap_time.has(action) and now - last_tap_time[action] <= roll_double_tap_window:
+					roll_request_pending = true
+					roll_request_dir = tap_dirs[action]
+					roll_buffer_timer = roll_input_buffer
+					last_tap_time.erase(action)   # a third tap starts a fresh count
+				else:
+					last_tap_time[action] = now
+				break
+
 	if event.is_action_pressed("ui_cancel"):
 		mouse_captured = !mouse_captured
 		Input.set_mouse_mode(
@@ -278,6 +390,9 @@ func _process(delta: float) -> void:
 			target_squint += squint_crouch_boost
 		if is_zooming:
 			target_squint += squint_zoom_boost
+		if is_rolling:
+			# NEW: air rolls use a much lighter vignette than ground rolls
+			target_squint += air_roll_vignette_boost if roll_is_air else roll_vignette_boost
 		target_squint = clampf(target_squint, 0.0, 1.0)
 
 		current_squint = lerp(current_squint, target_squint, squint_smoothing * delta)
@@ -285,7 +400,7 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseMotion and mouse_captured:
+	if event is InputEventMouseMotion and mouse_captured and not is_dead:
 		rotate_y(-event.relative.x * mouse_sensitivity)
 
 		pitch -= event.relative.y * mouse_sensitivity
@@ -295,11 +410,23 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _physics_process(delta: float) -> void:
 
+	if is_dead:
+		_dead_physics(delta)
+		return
+
 	dash_cooldown_timer = max(dash_cooldown_timer - delta, 0.0)
 	knockback_timer = max(knockback_timer - delta, 0.0)
-	_update_dash_charges(delta)
 
 	update_health_and_shield(delta)
+
+	# NEW: while knocked down you can't act — you skid, then get back up.
+	if is_knocked_down:
+		_knockdown_physics(delta)
+		return
+
+	# NEW: rolling into a wall kicks you off it (checked before wall-cling so cling can't steal the roll).
+	if is_dashing and is_rolling and roll_wall_bounce and is_on_wall():
+		_try_roll_wall_bounce()
 
 	if is_sliding:
 		is_crouching = true
@@ -322,7 +449,16 @@ func _physics_process(delta: float) -> void:
 		"move_back"
 	)
 
-	if Input.is_action_just_pressed("dash") and dash_cooldown_timer <= 0.0 and dash_charges > 0:
+	# NEW: double-tap roll request (buffered briefly so a slightly-early tap still counts).
+	roll_buffer_timer = max(roll_buffer_timer - delta, 0.0)
+	if roll_request_pending:
+		if roll_buffer_timer <= 0.0:
+			roll_request_pending = false
+		elif not is_dashing and dash_cooldown_timer <= 0.0 and stamina >= dash_stamina_cost:
+			start_dash(true, roll_request_dir)
+			roll_request_pending = false
+
+	if Input.is_action_just_pressed("dash") and dash_cooldown_timer <= 0.0 and stamina >= dash_stamina_cost:
 		start_dash()
 
 	var flat_speed := Vector2(velocity.x, velocity.z).length()
@@ -330,19 +466,21 @@ func _physics_process(delta: float) -> void:
 	if Input.is_action_just_pressed("crouch") \
 	and is_on_floor() \
 	and not is_sliding \
+	and not is_dashing \
 	and flat_speed > 4.0 \
 	and (is_sprinting or slide_from_walk) \
 	and input_dir.length() > 0.5:
 		start_slide()
 
-	elif Input.is_action_just_pressed("crouch") and is_on_floor() and not is_sliding:
+	elif Input.is_action_just_pressed("crouch") and is_on_floor() and not is_sliding and not is_dashing:
 		is_crouching = !is_crouching
 
 	# Crouch in mid-air = ground slam
 	if Input.is_action_just_pressed("crouch") and not is_on_floor() and not is_slamming and not is_dashing:
 		start_slam()
 
-	if is_on_wall() and not is_on_floor() and not is_wall_clinging and not is_sliding and not is_slamming and velocity.y < 0.0:
+	# NEW: "and not is_dashing" — a roll no longer gets frozen in place by wall cling.
+	if is_on_wall() and not is_on_floor() and not is_wall_clinging and not is_sliding and not is_slamming and not is_dashing and velocity.y < 0.0:
 		var space_state = get_world_3d().direct_space_state
 		var ray = PhysicsRayQueryParameters3D.create(
 			global_position,
@@ -390,14 +528,30 @@ func _physics_process(delta: float) -> void:
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
 	# ---- Sprint ramp-up: takes sprint_ramp_time to reach full sprint speed ----
-	var actively_sprinting := is_sprinting and is_on_floor() and not is_crouching and not is_sliding and direction.length() > 0.1
-	if actively_sprinting:
+	# sprint_input = you're sprinting and moving; the ramp only builds on the ground but is HELD
+	# (not reset) in the air, so you keep full sprint speed through a jump instead of dropping to a walk.
+	var sprint_input := is_sprinting and not is_crouching and not is_sliding and direction.length() > 0.1
+	if sprint_input and is_on_floor():
 		sprint_ramp = min(sprint_ramp + delta / sprint_ramp_time, 1.0)
+	elif sprint_input and not is_on_floor():
+		pass
 	else:
 		sprint_ramp = max(sprint_ramp - delta / (sprint_ramp_time * 0.5), 0.0)
 
-	# ---- Stamina: drains while actively sprinting, regens after a short delay ----
-	if actively_sprinting:
+	# ---- Stamina ----
+	# Drains while sprinting. Jumps take a one-time chunk (see _spend_jump_stamina). Touching or clinging to a wall
+	# in the air refills it fast, with an instant burst on first contact. Otherwise it regens after a short delay.
+	var wall_contact := not is_on_floor() and (is_on_wall() or is_wall_clinging)
+	wall_hit_cooldown_timer = max(wall_hit_cooldown_timer - delta, 0.0)
+
+	if wall_contact:
+		if not was_wall_contact and wall_hit_cooldown_timer <= 0.0:
+			stamina = min(stamina + wall_hit_stamina_burst, max_stamina)
+			wall_hit_cooldown_timer = wall_hit_cooldown
+		stamina = min(stamina + wall_stamina_regen_rate * delta, max_stamina)
+		stamina_regen_timer = 0.0
+		stats_changed.emit()
+	elif sprint_input:
 		stamina = max(stamina - stamina_drain_rate * delta, 0.0)
 		stamina_regen_timer = stamina_regen_delay
 		stats_changed.emit()
@@ -408,15 +562,23 @@ func _physics_process(delta: float) -> void:
 			stamina = min(stamina + stamina_regen_rate * delta, max_stamina)
 			if stamina != prev_stamina:
 				stats_changed.emit()
+	was_wall_contact = wall_contact
 
 	if is_dashing:
 		dash_timer -= delta
-		velocity = dash_direction * dash_speed
+
+		if is_rolling:
+			# Roll starts fast and eases out; roll_progress drives the camera motion.
+			roll_progress = clampf(1.0 - dash_timer / maxf(roll_duration, 0.01), 0.0, 1.0)
+			var roll_spd := roll_current_speed * (0.55 + 0.45 * (1.0 - roll_progress))
+			velocity.x = dash_direction.x * roll_spd
+			velocity.z = dash_direction.z * roll_spd
+			# velocity.y is left alone: on the ground it stays put, in the air gravity keeps acting.
+		else:
+			velocity = dash_direction * dash_speed
 
 		if dash_timer <= 0.0:
-			is_dashing = false
-			# Keep some momentum instead of stopping dead — lets you chain dash into slide/jump.
-			velocity = dash_direction * dash_speed * dash_exit_momentum
+			_end_dash()
 
 	elif is_wall_clinging:
 		velocity = Vector3.ZERO
@@ -463,7 +625,7 @@ func _physics_process(delta: float) -> void:
 
 			if is_crouching:
 				current_speed = crouch_speed * dir_mult
-			elif is_sprinting and is_on_floor():
+			elif is_sprinting:
 				# Fatigue: speed tapers off as stamina runs low instead of hard-cutting
 				var stamina_ratio: float = stamina / max_stamina
 				var stamina_mult: float = lerp(
@@ -502,23 +664,41 @@ func _physics_process(delta: float) -> void:
 			# While being knocked back, you have much less control for a moment.
 			var control := 0.15 if knockback_timer > 0.0 else 1.0
 
-			var accel := ground_accel if is_on_floor() else air_accel
-			if vel_dot < turn_brake_dot_threshold:
-				accel = (ground_decel if is_on_floor() else air_accel) * turn_brake_mult
-			accel *= control
+			var wish: Vector2 = desired_dir2 * current_speed
+			var cur_speed := horizontal_vel.length()
 
-			if direction:
-				velocity.x = move_toward(velocity.x, direction.x * current_speed, accel * delta)
-				velocity.z = move_toward(velocity.z, direction.z * current_speed, accel * delta)
-			else:
-				# In the air with no input, keep momentum (no air friction); on the ground, stop quickly.
-				if is_on_floor():
-					velocity.x = move_toward(velocity.x, 0, ground_decel * control * delta)
-					velocity.z = move_toward(velocity.z, 0, ground_decel * control * delta)
+			if is_on_floor():
+				var accel := ground_accel
+				if vel_dot < turn_brake_dot_threshold:
+					accel = ground_decel * turn_brake_mult
+				elif cur_speed > current_speed and vel_dot > 0.0:
+					# Carrying extra speed (from a jump/dash/slide): let it fade slowly
+					# instead of snapping straight back down to run speed.
+					accel = ground_overspeed_decel
+				accel *= control
+
+				if direction:
+					horizontal_vel = horizontal_vel.move_toward(wish, accel * delta)
+				else:
+					horizontal_vel = horizontal_vel.move_toward(Vector2.ZERO, ground_decel * control * delta)
+			elif direction:
+				# In the air there's no friction, so momentum carries. You can steer, and build speed up
+				# to your run speed, but you never get slowed down below the speed you jumped with.
+				var air_a := air_accel * control
+				if cur_speed <= current_speed:
+					horizontal_vel = horizontal_vel.move_toward(wish, air_a * delta)
+				else:
+					horizontal_vel = (horizontal_vel + desired_dir2.normalized() * air_a * delta).limit_length(cur_speed)
+
+			velocity.x = horizontal_vel.x
+			velocity.z = horizontal_vel.y
 
 	if Input.is_action_just_pressed("jump"):
 
 		if is_on_floor():
+			if is_dashing:
+				_end_dash()   # jumping out of a dash/roll carries its momentum
+
 			var final_jump := jump_velocity
 
 			if is_sprinting:
@@ -531,8 +711,10 @@ func _physics_process(delta: float) -> void:
 				horiz *= slide_exit_speed_boost
 				velocity.x = horiz.x
 				velocity.z = horiz.y
+				stop_slide()   # end the slide so the boosted speed carries through the air
 
 			velocity.y = max(velocity.y, final_jump)
+			_spend_jump_stamina()
 
 		elif is_wall_clinging:
 			is_wall_clinging = false
@@ -579,24 +761,25 @@ func _physics_process(delta: float) -> void:
 				velocity.z = h_vel.y
 
 		if auto_bhop and Input.is_action_pressed("jump"):
+			if velocity.y < jump_velocity:
+				_spend_jump_stamina()   # an auto-hop is a jump too (skipped if a normal jump already paid this frame)
 			velocity.y = max(velocity.y, jump_velocity)
 
 	was_on_floor = is_on_floor()
 
 	move_and_slide()
 
+	# NEW: landed before finishing an air roll = you botch it and tumble.
+	if is_dashing and is_rolling and roll_is_air and is_on_floor() \
+	and roll_progress < air_roll_complete_progress:
+		_start_knockdown()
+
 	if is_slamming and is_on_floor():
 		_slam_impact()
 
-	if global_position.y < -20.0:
-		global_position = Vector3(0, 2, 0)
-		velocity = Vector3.ZERO
-		is_sliding = false
-		is_dashing = false
-		is_slamming = false
-		is_wall_clinging = false
-		is_crouching = false
-		is_sprinting = false
+	# Fell off the map = dead (then respawns like any other death).
+	if global_position.y < kill_height:
+		die(void_respawn_delay)
 
 	update_fov(delta)
 	update_camera_tilt(delta)
@@ -637,8 +820,7 @@ func take_damage(amount: float, hit_point: Vector3 = Vector3.ZERO, shooter: Node
 	stats_changed.emit()
 
 	if health <= 0.0 and not is_dead:
-		is_dead = true
-		died.emit()
+		die()
 
 
 ## Call for healing pickups — only restores health, not shield.
@@ -666,6 +848,82 @@ func apply_knockback(impulse: Vector3) -> void:
 	is_wall_clinging = false
 
 
+## Kill the player and schedule a respawn. `wait` < 0 uses respawn_delay.
+func die(wait: float = -1.0) -> void:
+	if is_dead:
+		return
+	is_dead = true
+	health = 0.0
+
+	is_sliding = false
+	is_dashing = false
+	is_rolling = false
+	roll_is_air = false
+	is_knocked_down = false
+	roll_request_pending = false
+	is_slamming = false
+	is_wall_clinging = false
+	is_crouching = false
+	is_sprinting = false
+	is_zooming = false
+
+	stats_changed.emit()
+	died.emit()
+
+	var t := respawn_delay if wait < 0.0 else wait
+	await get_tree().create_timer(t).timeout
+	respawn()
+
+
+func respawn() -> void:
+	global_position = spawn_position
+	rotation = Vector3(0.0, spawn_yaw, 0.0)
+	pitch = 0.0
+	head.rotation.x = 0.0
+	velocity = Vector3.ZERO
+
+	health = max_health
+	shield = max_shield
+	stamina = max_stamina
+	dash_cooldown_timer = 0.0
+	stamina_regen_timer = 0.0
+	shield_regen_timer = 0.0
+	health_regen_timer = 0.0
+	knockback_timer = 0.0
+	knockdown_timer = 0.0
+	is_knocked_down = false
+	roll_is_air = false
+	was_wall_contact = false
+	wall_hit_cooldown_timer = 0.0
+	restore_camera_pitch = false
+	sprint_ramp = 0.0
+	was_on_floor = false
+
+	# Undo the death-cam and crouch squash.
+	camera.rotation = Vector3(base_camera_rot_x, 0.0, 0.0)
+	camera.position = base_camera_pos
+	var shape = collision.shape as CapsuleShape3D
+	if shape:
+		shape.height = stand_height
+
+	is_dead = false
+	invuln_timer = respawn_invuln_time
+	stats_changed.emit()
+	respawned.emit()
+
+
+## While dead: no input, body settles to the ground, camera slumps over.
+func _dead_physics(delta: float) -> void:
+	velocity.x = move_toward(velocity.x, 0.0, 20.0 * delta)
+	velocity.z = move_toward(velocity.z, 0.0, 20.0 * delta)
+	if not is_on_floor():
+		velocity += get_gravity() * delta
+	move_and_slide()
+
+	camera.rotation.z = lerp(camera.rotation.z, deg_to_rad(65.0), 3.0 * delta)
+	camera.position.y = lerp(camera.position.y, crouch_cam_y - 0.4, 3.0 * delta)
+
+
 func update_health_and_shield(delta: float) -> void:
 	if is_dead:
 		return
@@ -691,45 +949,188 @@ func update_health_and_shield(delta: float) -> void:
 
 
 # -------------------------
-# DASH
+# DASH / ROLL
 # -------------------------
-func _update_dash_charges(delta: float) -> void:
-	if dash_charges < max_dash_charges:
-		dash_recharge_timer += delta
-		if dash_recharge_timer >= dash_recharge_time:
-			dash_recharge_timer = 0.0
-			dash_charges += 1
-			stats_changed.emit()
-	else:
-		dash_recharge_timer = 0.0
 
-
-func start_dash():
-	if is_crouching and not is_sliding:
+## NEW: one-time stamina chunk for a jump. Never blocks the jump — it just bottoms out at 0.
+func _spend_jump_stamina() -> void:
+	if jump_stamina_cost <= 0.0:
 		return
+	stamina = max(stamina - jump_stamina_cost, 0.0)
+	stamina_regen_timer = stamina_regen_delay
+	stats_changed.emit()
 
+
+## How many full dashes your current stamina can pay for (handy for a HUD readout).
+func get_dash_charges() -> int:
+	return int(stamina / dash_stamina_cost + 0.0001)
+
+
+func start_dash(force_roll := false, tap_dir := Vector2.ZERO):
+	# Dashing while crouched, sliding, or in mid-air turns the dash into a roll.
+	# NEW: a double-tapped movement key (force_roll) is always a roll, even standing on the ground.
+	var rolling := force_roll or is_crouching or is_sliding or not is_on_floor()
+
+	# Leaving a slide into a roll keeps you low; a normal dash out of a slide is not possible anymore.
 	if is_sliding:
-		stop_slide()
+		is_sliding = false
 
 	is_slamming = false
 	is_wall_clinging = false
+	is_sprinting = false
+
+	is_rolling = rolling
+	roll_is_air = rolling and not is_on_floor()   # NEW: air rolls get the gentler camera + the "must finish it" rule
+	roll_progress = 0.0
+	# Never roll slower than the speed you were already carrying (keeps momentum).
+	roll_current_speed = maxf(roll_speed, Vector2(velocity.x, velocity.z).length())
 
 	is_dashing = true
-	dash_timer = dash_duration
+	dash_timer = roll_duration if rolling else dash_duration
 	dash_cooldown_timer = dash_cooldown
-	dash_charges -= 1
+
+	# Dashing/rolling costs stamina and pauses stamina regen briefly.
+	stamina = max(stamina - dash_stamina_cost, 0.0)
+	stamina_regen_timer = stamina_regen_delay
 	stats_changed.emit()
 
-	if dash_grants_iframes:
+	if rolling:
+		if roll_grants_iframes:
+			invuln_timer = max(invuln_timer, roll_iframe_time)
+	elif dash_grants_iframes:
 		invuln_timer = max(invuln_timer, dash_duration + 0.05)
 
 	var input_dir := Input.get_vector("move_left","move_right","move_forward","move_back")
+	# Roll direction comes from the movement keys, not from where the mouse is looking.
+	# (If the tapped key was already released, fall back to the direction that was tapped.)
+	if input_dir.length() < 0.1 and tap_dir != Vector2.ZERO:
+		input_dir = tap_dir
 	var dir := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 
 	if dir.length() == 0:
 		dir = -transform.basis.z
 
 	dash_direction = dir.normalized()
+
+
+func _end_dash() -> void:
+	is_dashing = false
+
+	# Keep some momentum instead of stopping dead — lets you chain a dash/roll into a jump or slide.
+	var exit_speed := roll_current_speed * roll_exit_momentum if is_rolling else dash_speed * dash_exit_momentum
+	var exit_vel := dash_direction * exit_speed
+	if is_rolling:
+		exit_vel.y = velocity.y   # don't freeze vertical motion when an air roll ends
+	velocity = exit_vel
+
+	if is_rolling:
+		is_rolling = false
+		roll_is_air = false
+		roll_progress = 0.0
+		# A full 360° spin ends exactly where it started; snap the camera back to neutral.
+		camera.rotation.x = base_camera_rot_x
+		camera.rotation.z = 0.0
+
+
+## NEW: a roll that runs head-on into a wall kicks you off it, like a wall jump.
+## Returns true if the bounce happened.
+func _try_roll_wall_bounce() -> bool:
+	var n := get_wall_normal()
+	n.y = 0.0
+	if n.length() < 0.1:
+		return false
+	n = n.normalized()
+
+	# Only bounce if the roll is actually heading into the wall (not just grazing along it).
+	if dash_direction.dot(n) > -roll_wall_bounce_min_dot:
+		return false
+
+	# Kick away from the wall: reflect the roll direction, blended with the wall normal so it never skims along it.
+	var out := (dash_direction.bounce(n) + n).normalized()
+	var h_speed := maxf(roll_current_speed * roll_wall_bounce_speed_mult, 6.0)
+
+	# End the roll without the usual exit-momentum rewrite.
+	is_dashing = false
+	is_rolling = false
+	roll_is_air = false
+	roll_progress = 0.0
+	is_wall_clinging = false
+	restore_camera_pitch = true   # camera eases back to level instead of snapping
+
+	velocity.x = out.x * h_speed
+	velocity.z = out.z * h_speed
+	# Same up-boost formula as your normal wall jump, scaled down a bit.
+	velocity.y = clampf(
+		h_speed * 0.22 * wall_jump_up_boost,
+		min_wall_jump_up * wall_jump_up_boost,
+		max_wall_jump_up * wall_jump_up_boost
+	) * roll_wall_bounce_up_mult
+
+	# Reward the wall-kick so you can chain it into another dash.
+	stamina = minf(stamina + roll_wall_bounce_stamina_refund, max_stamina)
+	stamina_regen_timer = stamina_regen_delay
+	dash_cooldown_timer = 0.0
+	stats_changed.emit()
+	roll_wall_bounced.emit()
+	return true
+
+
+# -------------------------
+# KNOCKDOWN (failed air roll)
+# -------------------------
+func _start_knockdown() -> void:
+	# Tilt the camera toward the side you were rolling.
+	var local_dir := global_transform.basis.inverse() * dash_direction
+	knockdown_tilt_sign = -1.0 if local_dir.x < 0.0 else 1.0
+
+	is_dashing = false
+	is_rolling = false
+	roll_is_air = false
+	roll_progress = 0.0
+
+	is_knocked_down = true
+	knockdown_timer = knockdown_duration
+
+	is_sprinting = false
+	is_crouching = false
+	is_sliding = false
+	is_slamming = false
+	is_wall_clinging = false
+	sprint_ramp = 0.0
+
+	# Skid for a moment instead of stopping dead.
+	velocity.x *= 0.6
+	velocity.z *= 0.6
+	velocity.y = 0.0
+	dash_cooldown_timer = knockdown_duration
+	knocked_down.emit()
+
+
+func _knockdown_physics(delta: float) -> void:
+	knockdown_timer -= delta
+
+	velocity.x = move_toward(velocity.x, 0.0, knockdown_friction * delta)
+	velocity.z = move_toward(velocity.z, 0.0, knockdown_friction * delta)
+	if not is_on_floor():
+		velocity += get_gravity() * delta
+
+	was_on_floor = is_on_floor()
+	move_and_slide()
+
+	if global_position.y < kill_height:
+		die(void_respawn_delay)
+		return
+
+	if knockdown_timer <= 0.0:
+		# Back on your feet — unless there's a low ceiling, then stay crouched.
+		is_knocked_down = false
+		is_crouching = not can_stand_up()
+		restore_camera_pitch = true
+
+	handle_crouch(delta)
+	update_fov(delta)
+	update_camera_tilt(delta)
+	apply_headbob(delta)
 
 
 # -------------------------
@@ -812,7 +1213,10 @@ func update_fov(delta: float) -> void:
 
 	var sprint_multiplier := 1.6 if is_sprinting else 1.0
 
-	if is_dashing:
+	if is_rolling:
+		# NEW: air rolls squeeze the FOV far less than ground rolls.
+		target = normal_fov + (air_roll_fov_change if roll_is_air else roll_fov_change)
+	elif is_dashing:
 		target = dash_fov
 	elif is_slamming:
 		target = slam_fov
@@ -825,7 +1229,7 @@ func update_fov(delta: float) -> void:
 	elif is_sprinting:
 		# FOV widens in step with the sprint ramp-up, not instantly
 		target = lerp(normal_fov, sprint_fov, sprint_ramp)
-	elif is_crouching:
+	elif is_crouching or is_knocked_down:
 		target = normal_fov - 5.0
 
 	current_fov = lerp(current_fov, target, fov_speed * sprint_multiplier * delta)
@@ -836,6 +1240,43 @@ func update_fov(delta: float) -> void:
 # CAMERA TILT
 # -------------------------
 func update_camera_tilt(delta: float) -> void:
+	# Roll camera.
+	if is_rolling:
+		var local_dir := global_transform.basis.inverse() * dash_direction
+
+		# NEW: AIR roll = no spin at all. A smooth lean into the roll that peaks mid-roll and returns to level,
+		# plus a tiny pitch cue (nose up for back-rolls, a slight dip for forward). Much easier on the stomach.
+		if roll_is_air:
+			var air_amt := deg_to_rad(air_roll_tilt_degrees) * sin(roll_progress * PI)
+			camera.rotation.x = base_camera_rot_x + air_amt * (maxf(local_dir.z, 0.0) - 0.4 * maxf(-local_dir.z, 0.0))
+			camera.rotation.z = -air_amt * local_dir.x
+			return
+
+		# GROUND roll (unchanged): backward = back-flip, sideways = barrel roll, forward = no camera flip,
+		# or just a gentle tilt if roll_full_spin is off.
+		var amount: float
+		if roll_full_spin:
+			# Smoothstep easing: the spin starts and ends gently instead of snapping.
+			var eased := roll_progress * roll_progress * (3.0 - 2.0 * roll_progress)
+			amount = deg_to_rad(roll_spin_degrees) * eased
+		else:
+			# Smooth dip that peaks mid-roll and returns to level by the end — no spinning.
+			amount = deg_to_rad(roll_camera_tilt_degrees) * sin(roll_progress * PI)
+		# No front rolls: only a backward roll pitches the camera. Forward rolls get no flip
+		# (sideways rolls still barrel-roll via the z rotation below).
+		camera.rotation.x = base_camera_rot_x + amount * maxf(local_dir.z, 0.0)
+		camera.rotation.z = -amount * local_dir.x
+		return
+
+	# NEW: knocked down — camera lists to one side and looks slightly down, easing back to level as you get up.
+	if is_knocked_down:
+		var k := clampf(knockdown_timer / maxf(knockdown_duration, 0.01), 0.0, 1.0)
+		var target_z := deg_to_rad(knockdown_camera_tilt_degrees) * knockdown_tilt_sign * k
+		var target_x := base_camera_rot_x - deg_to_rad(6.0) * k
+		camera.rotation.z = lerp(camera.rotation.z, target_z, 12.0 * delta)
+		camera.rotation.x = lerp(camera.rotation.x, target_x, 12.0 * delta)
+		return
+
 	var target_roll := 0.0
 
 	if is_wall_clinging:
@@ -844,6 +1285,14 @@ func update_camera_tilt(delta: float) -> void:
 		target_roll = slide_tilt_amount * slide_direction.x
 
 	camera.rotation.z = lerp(camera.rotation.z, deg_to_rad(target_roll), 6.0 * delta)
+
+	# NEW: after a wall bounce / getting up, ease the camera pitch back to neutral (only then, so this
+	# never fights anything else that touches camera.rotation.x, like recoil).
+	if restore_camera_pitch:
+		camera.rotation.x = lerp(camera.rotation.x, base_camera_rot_x, 8.0 * delta)
+		if absf(camera.rotation.x - base_camera_rot_x) < 0.002:
+			camera.rotation.x = base_camera_rot_x
+			restore_camera_pitch = false
 
 	var pos := camera.position
 	pos.x = lerp(pos.x, slide_direction.x * slide_lean_amount, 6.0 * delta)
@@ -858,8 +1307,12 @@ func handle_crouch(delta: float) -> void:
 	if not shape:
 		return
 
-	var target_h = crouch_height if is_crouching else stand_height
-	var target_y = crouch_cam_y if is_crouching else stand_cam_y
+	# Rolling (including in the air) and being knocked down both tuck you down to crouch size.
+	var low := is_crouching or is_rolling or is_knocked_down
+	var target_h = crouch_height if low else stand_height
+	var target_y = crouch_cam_y if low else stand_cam_y
+	if is_knocked_down:
+		target_y = crouch_cam_y - knockdown_camera_drop   # lower still; rises as you get up
 
 	shape.height = lerp(shape.height, target_h, crouch_lerp_speed * delta)
 	camera.position.y = lerp(camera.position.y, target_y, crouch_lerp_speed * delta)
@@ -869,6 +1322,9 @@ func handle_crouch(delta: float) -> void:
 # HEAD BOB
 # -------------------------
 func apply_headbob(delta: float) -> void:
+	if is_rolling or is_knocked_down:
+		return  # no bobbing on top of the roll tilt / knockdown drop
+
 	var moving := is_on_floor() and velocity.length() > 0.1
 
 	if not moving:

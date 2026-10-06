@@ -189,3 +189,5 @@ offset_bottom = 1.0
 
 [node name="HUD" parent="." unique_id=652414977 instance=ExtResource("6_4c57u")]
 script = ExtResource("11_efxa6")
+
+[node name="Node" type="Node" parent="." unique_id=1451125049]

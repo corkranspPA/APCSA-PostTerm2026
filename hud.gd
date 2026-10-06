@@ -40,12 +40,19 @@ var player: CharacterBody3D
 var _state := {}
 var _time := 0.0
 
+# Per-gauge vertical fill range (see _compute_fill_range)
+var _fill_range := {}
+
 
 func _ready() -> void:
 	for g in [health_gauge, shield_gauge, stamina_gauge]:
 		if g:
 			g.step = 0.0        # continuous values, no whole-number snapping
 			g.rounded = false
+			g.min_value = 0.0
+			g.max_value = 1.0   # we feed it a 0..1 fill height (see _update_gauge)
+			g.fill_mode = TextureProgressBar.FILL_BOTTOM_TO_TOP
+			_fill_range[g] = _compute_fill_range(g)
 
 	if player_path != NodePath():
 		player = get_node(player_path)
@@ -82,7 +89,6 @@ func _update_gauge(gauge: TextureProgressBar, key: String, target: float, max_v:
 		_state[key] = {"shown": target, "last": target, "flash": 0.0}
 
 	var s: Dictionary = _state[key]
-	gauge.max_value = max_v
 
 	# Hit detection: a sudden drop since last frame triggers the flash.
 	if s.last - target >= min_drop_for_flash and hit_tint != Color.WHITE:
@@ -94,7 +100,13 @@ func _update_gauge(gauge: TextureProgressBar, key: String, target: float, max_v:
 	s.shown = lerpf(s.shown, target, 1.0 - exp(-rate * delta))
 	if absf(s.shown - target) < 0.005:
 		s.shown = target
-	gauge.value = s.shown
+
+	# Each gauge's texture is the FULL icon with only its own zone painted in, so a
+	# plain 0..max fill wastes most of its range on empty rows (the bar looks frozen,
+	# then drains in a rush). Map the stat across just the rows this zone occupies.
+	var ratio := clampf(s.shown / max_v, 0.0, 1.0) if max_v > 0.0 else 0.0
+	var fr: Vector2 = _fill_range.get(gauge, Vector2(0.0, 1.0))
+	gauge.value = lerpf(fr.x, fr.y, ratio)
 
 	# Flash fade + low-value pulse.
 	s.flash = maxf(s.flash - flash_decay * delta, 0.0)
@@ -107,3 +119,33 @@ func _update_gauge(gauge: TextureProgressBar, key: String, target: float, max_v:
 		col.a = 1.0
 
 	gauge.modulate = col
+
+
+## Finds the top/bottom rows of the painted zone in the gauge's progress texture and
+## returns them as fill fractions measured from the bottom: (fill at zone bottom,
+## fill at zone top). A fill of 0..1 on the progress bar spans the whole icon height.
+func _compute_fill_range(gauge: TextureProgressBar) -> Vector2:
+	var tex := gauge.texture_progress
+	if tex == null:
+		return Vector2(0.0, 1.0)
+	var img := tex.get_image()
+	if img == null:
+		return Vector2(0.0, 1.0)
+	if img.is_compressed():
+		img.decompress()
+
+	var w := img.get_width()
+	var h := img.get_height()
+	var top := -1
+	var bottom := -1
+	for y in h:
+		for x in w:
+			if img.get_pixel(x, y).a > 0.05:
+				if top == -1:
+					top = y
+				bottom = y
+				break
+	if top == -1:
+		return Vector2(0.0, 1.0)
+
+	return Vector2(1.0 - float(bottom + 1) / float(h), 1.0 - float(top) / float(h))
