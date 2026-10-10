@@ -55,7 +55,7 @@ var wall_hit_cooldown_timer := 0.0
 # HEALTH (red) / SHIELD (blue)
 # -------------------------
 @export var max_health := 100.0
-@export var health_regen_rate := 0.0         # per second once regen delay passes (0 = off, rely on shield + pickups)
+@export var health_regen_rate := 2.0         # per second once regen delay passes (0 = off, rely on shield + pickups)
 @export var health_regen_delay := 4.0        # seconds after last hit before health can start regenerating
 @export var invuln_time := 0.4               # brief invulnerability window right after a hit
 
@@ -128,15 +128,19 @@ signal roll_wall_bounced # NEW: a roll hit a wall and kicked you off it
 # Comfort aids while rolling: a vignette hides the fast-moving screen edges and a narrower FOV
 # reduces peripheral motion — both are well-known ways to cut motion sickness.
 @export var roll_vignette_boost := 0.5        # extra squint-vignette during a ground roll (needs the eyelid overlay)
-@export var roll_fov_change := -8.0           # FOV added during a ground roll (negative = narrower)
+@export var roll_fov_change := -4.0           # FOV added during a ground roll (negative = narrower)
+@export var roll_fov_kick := 6.0              # NEW: extra FOV that follows the speed surge, so the launch feels fast
+@export var ground_roll_surge := 0.25         # NEW: extra speed at the start of a ground roll, as a fraction of its speed
 
 # -------------------------
 # AIR ROLL (NEW) — easier on the eyes than the ground roll
 # -------------------------
-# Air rolls NEVER spin the camera. They just lean a few degrees into the roll and back out,
-# with almost no FOV change and only a light vignette.
-@export var air_roll_tilt_degrees := 9.0       # peak camera lean mid-roll (0 = no camera motion at all)
-@export var air_roll_fov_change := -3.0        # much smaller FOV squeeze than the ground roll
+# Air rolls NEVER move or rotate the camera. Instead the momentum comes from SPEED: you surge forward a
+# little in the roll direction, then ease back down to the speed you came in with.
+@export var air_roll_speed_boost := 0.3        # peak extra speed as a fraction of your entry speed (0.3 = +30%)
+@export var air_roll_min_speed := 7.0          # entry speed used if you were slower than this (e.g. a standing jump)
+@export var air_roll_gravity_mult := 0.8       # slightly floatier while rolling in the air (arc feels smoother, easier to finish)
+@export var air_roll_fov_kick := 5.0           # FOV widens by this much at the peak of the surge, then settles
 @export var air_roll_vignette_boost := 0.15    # light vignette so the screen edges don't swim
 # If you land before the air roll is this far along (0..1), you botch it and tumble. Set to 0 to disable.
 @export var air_roll_complete_progress := 0.7
@@ -311,6 +315,22 @@ var is_zooming := false
 
 var current_squint := 0.0
 
+# -------------------------
+# DAMAGE FLASH (maroon vignette)
+# -------------------------
+@export var health_flash_color := Color(0.85, 0.05, 0.05)  # red: health took damage
+@export var shield_flash_color := Color(0.1, 0.4, 1.0)     # blue: shield took damage
+@export var both_flash_color := Color(0.6, 0.1, 0.9)       # purple: ONE hit hurt shield AND health
+@export var damage_flash_min := 0.55          # flash strength for a tiny hit (0..1)
+@export var damage_flash_max := 1.0           # flash strength for a big hit
+@export var damage_flash_fade := 2.5          # higher = flash fades faster (about 0.4s at 2.5)
+@export var damage_flash_inner := 0.3         # how far the clear centre reaches (0 = all colour, 1 = edges only)
+
+var health_flash := 0.0
+var shield_flash := 0.0
+var both_flash := 0.0
+var damage_flash_rect: ColorRect
+
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -340,6 +360,8 @@ func _ready() -> void:
 	# ---- give the weapon a reference to this player ----
 	if Weapon:
 		Weapon.player = self
+
+	_build_damage_flash()
 
 
 func _input(event: InputEvent) -> void:
@@ -371,6 +393,17 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+	# Damage flash: red for health hits, blue for shield hits. Both fade out smoothly.
+	if health_flash > 0.0 or shield_flash > 0.0 or both_flash > 0.0:
+		health_flash = move_toward(health_flash, 0.0, damage_flash_fade * delta)
+		shield_flash = move_toward(shield_flash, 0.0, damage_flash_fade * delta)
+		both_flash = move_toward(both_flash, 0.0, damage_flash_fade * delta)
+		if damage_flash_rect:
+			var fm := damage_flash_rect.material as ShaderMaterial
+			fm.set_shader_parameter("health_intensity", health_flash)
+			fm.set_shader_parameter("shield_intensity", shield_flash)
+			fm.set_shader_parameter("both_intensity", both_flash)
+
 	if eyelid_overlay and eyelid_overlay.material:
 		var fatigue := 1.0 - clampf(stamina / max_stamina, 0.0, 1.0)
 		var hurt := 1.0 - clampf(health / max_health, 0.0, 1.0)
@@ -523,6 +556,8 @@ func _physics_process(delta: float) -> void:
 			var g := get_gravity() * delta
 			if velocity.y < 0.0:
 				g *= fall_gravity_mult
+			if is_dashing and roll_is_air:
+				g *= air_roll_gravity_mult
 			velocity += g
 
 	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
@@ -568,14 +603,17 @@ func _physics_process(delta: float) -> void:
 		dash_timer -= delta
 
 		if is_rolling:
-			# Roll starts fast and eases out; roll_progress drives the camera motion.
+			# Roll surges forward then settles (see _roll_speed_at); roll_progress also drives FOV / camera.
 			roll_progress = clampf(1.0 - dash_timer / maxf(roll_duration, 0.01), 0.0, 1.0)
-			var roll_spd := roll_current_speed * (0.55 + 0.45 * (1.0 - roll_progress))
+			var roll_spd := _roll_speed_at(roll_progress)
 			velocity.x = dash_direction.x * roll_spd
 			velocity.z = dash_direction.z * roll_spd
 			# velocity.y is left alone: on the ground it stays put, in the air gravity keeps acting.
 		else:
-			velocity = dash_direction * dash_speed
+			# Plain dash: full speed at launch, easing down to the exit speed so it doesn't snap when it ends.
+			var dash_progress := clampf(1.0 - dash_timer / maxf(dash_duration, 0.01), 0.0, 1.0)
+			var dash_spd := dash_speed * lerpf(1.0, dash_exit_momentum, smoothstep(0.0, 1.0, dash_progress))
+			velocity = dash_direction * dash_spd
 
 		if dash_timer <= 0.0:
 			_end_dash()
@@ -812,6 +850,8 @@ func take_damage(amount: float, hit_point: Vector3 = Vector3.ZERO, shooter: Node
 	health_regen_timer = health_regen_delay
 	invuln_timer = invuln_time
 
+	_flash_damage(amount - remaining, remaining)   # (damage the shield took, damage health took)
+
 	# A hit that fully breaks the shield makes it take longer to come back.
 	if had_shield and shield <= 0.0:
 		shield_regen_timer = shield_regen_delay + shield_break_extra_delay
@@ -821,6 +861,64 @@ func take_damage(amount: float, hit_point: Vector3 = Vector3.ZERO, shooter: Node
 
 	if health <= 0.0 and not is_dead:
 		die()
+
+
+## Builds the maroon vignette overlay in code, so no scene changes are needed.
+func _build_damage_flash() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 50
+	add_child(layer)
+
+	var shader := Shader.new()
+	shader.code = """
+shader_type canvas_item;
+uniform vec4 health_color : source_color = vec4(0.85, 0.05, 0.05, 1.0);
+uniform vec4 shield_color : source_color = vec4(0.1, 0.4, 1.0, 1.0);
+uniform vec4 both_color : source_color = vec4(0.6, 0.1, 0.9, 1.0);
+uniform float health_intensity = 0.0;
+uniform float shield_intensity = 0.0;
+uniform float both_intensity = 0.0;
+uniform float inner_radius = 0.3;
+void fragment() {
+	float d = length(UV - vec2(0.5)) * 1.4142;
+	float v = smoothstep(inner_radius, 1.0, d);
+	float total = health_intensity + shield_intensity + both_intensity;
+	vec3 col = (health_color.rgb * health_intensity + shield_color.rgb * shield_intensity + both_color.rgb * both_intensity) / max(total, 0.0001);
+	float peak = max(max(health_intensity, shield_intensity), both_intensity);
+	COLOR = vec4(col, clamp(v * peak, 0.0, 1.0));
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("health_color", health_flash_color)
+	mat.set_shader_parameter("shield_color", shield_flash_color)
+	mat.set_shader_parameter("both_color", both_flash_color)
+	mat.set_shader_parameter("inner_radius", damage_flash_inner)
+	mat.set_shader_parameter("health_intensity", 0.0)
+	mat.set_shader_parameter("shield_intensity", 0.0)
+	mat.set_shader_parameter("both_intensity", 0.0)
+
+	damage_flash_rect = ColorRect.new()
+	damage_flash_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	damage_flash_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	damage_flash_rect.material = mat
+	layer.add_child(damage_flash_rect)
+
+
+## Kick the flash: blue if only the shield took damage, red if only health did, purple if one hit
+## hurt both. Bigger hits flash harder.
+func _flash_damage(shield_dmg: float, health_dmg: float) -> void:
+	if shield_dmg > 0.0 and health_dmg > 0.0:
+		var total := shield_dmg + health_dmg
+		var bs := lerpf(damage_flash_min, damage_flash_max, clampf(total / ((max_health + max_shield) * 0.3), 0.0, 1.0))
+		both_flash = maxf(both_flash, bs)
+		return
+	if shield_dmg > 0.0:
+		var ss := lerpf(damage_flash_min, damage_flash_max, clampf(shield_dmg / (max_shield * 0.4), 0.0, 1.0))
+		shield_flash = maxf(shield_flash, ss)
+	if health_dmg > 0.0:
+		var hs := lerpf(damage_flash_min, damage_flash_max, clampf(health_dmg / (max_health * 0.4), 0.0, 1.0))
+		health_flash = maxf(health_flash, hs)
 
 
 ## Call for healing pickups — only restores health, not shield.
@@ -895,6 +993,9 @@ func respawn() -> void:
 	roll_is_air = false
 	was_wall_contact = false
 	wall_hit_cooldown_timer = 0.0
+	health_flash = 0.0
+	shield_flash = 0.0
+	both_flash = 0.0
 	restore_camera_pitch = false
 	sprint_ramp = 0.0
 	was_on_floor = false
@@ -983,7 +1084,7 @@ func start_dash(force_roll := false, tap_dir := Vector2.ZERO):
 	roll_is_air = rolling and not is_on_floor()   # NEW: air rolls get the gentler camera + the "must finish it" rule
 	roll_progress = 0.0
 	# Never roll slower than the speed you were already carrying (keeps momentum).
-	roll_current_speed = maxf(roll_speed, Vector2(velocity.x, velocity.z).length())
+	roll_current_speed = maxf(air_roll_min_speed if roll_is_air else roll_speed, Vector2(velocity.x, velocity.z).length())
 
 	is_dashing = true
 	dash_timer = roll_duration if rolling else dash_duration
@@ -1017,7 +1118,7 @@ func _end_dash() -> void:
 	is_dashing = false
 
 	# Keep some momentum instead of stopping dead — lets you chain a dash/roll into a jump or slide.
-	var exit_speed := roll_current_speed * roll_exit_momentum if is_rolling else dash_speed * dash_exit_momentum
+	var exit_speed := _roll_speed_at(roll_progress) if is_rolling else dash_speed * dash_exit_momentum
 	var exit_vel := dash_direction * exit_speed
 	if is_rolling:
 		exit_vel.y = velocity.y   # don't freeze vertical motion when an air roll ends
@@ -1030,6 +1131,22 @@ func _end_dash() -> void:
 		# A full 360° spin ends exactly where it started; snap the camera back to neutral.
 		camera.rotation.x = base_camera_rot_x
 		camera.rotation.z = 0.0
+
+
+## NEW: 0 -> 1 -> 0 bump over a roll (p = 0..1). Rises quickly (peak about 30% in) and eases back to 0 at the end.
+func _roll_surge(p: float) -> float:
+	return sin(PI * pow(clampf(p, 0.0, 1.0), 0.6))
+
+
+## NEW: speed of the current roll at progress p (0..1).
+## Air roll: entry speed -> small surge -> back to the entry speed (so nothing snaps when it ends).
+## Ground roll: surge at the start, then settles to roll_exit_momentum of its speed.
+func _roll_speed_at(p: float) -> float:
+	var surge := _roll_surge(p)
+	if roll_is_air:
+		return roll_current_speed * (1.0 + air_roll_speed_boost * surge)
+	var settle := lerpf(1.0, roll_exit_momentum, smoothstep(0.0, 1.0, p))
+	return roll_current_speed * settle * (1.0 + ground_roll_surge * surge)
 
 
 ## NEW: a roll that runs head-on into a wall kicks you off it, like a wall jump.
@@ -1214,8 +1331,12 @@ func update_fov(delta: float) -> void:
 	var sprint_multiplier := 1.6 if is_sprinting else 1.0
 
 	if is_rolling:
-		# NEW: air rolls squeeze the FOV far less than ground rolls.
-		target = normal_fov + (air_roll_fov_change if roll_is_air else roll_fov_change)
+		# FOV follows the speed surge: widens a little as you launch, then settles back.
+		var surge := _roll_surge(roll_progress)
+		if roll_is_air:
+			target = normal_fov + air_roll_fov_kick * surge
+		else:
+			target = normal_fov + roll_fov_change + roll_fov_kick * surge
 	elif is_dashing:
 		target = dash_fov
 	elif is_slamming:
@@ -1244,12 +1365,10 @@ func update_camera_tilt(delta: float) -> void:
 	if is_rolling:
 		var local_dir := global_transform.basis.inverse() * dash_direction
 
-		# NEW: AIR roll = no spin at all. A smooth lean into the roll that peaks mid-roll and returns to level,
-		# plus a tiny pitch cue (nose up for back-rolls, a slight dip for forward). Much easier on the stomach.
+		# AIR roll = the camera stays level (no tilt, no spin). The speed surge + FOV kick carry the feel.
 		if roll_is_air:
-			var air_amt := deg_to_rad(air_roll_tilt_degrees) * sin(roll_progress * PI)
-			camera.rotation.x = base_camera_rot_x + air_amt * (maxf(local_dir.z, 0.0) - 0.4 * maxf(-local_dir.z, 0.0))
-			camera.rotation.z = -air_amt * local_dir.x
+			camera.rotation.x = lerp(camera.rotation.x, base_camera_rot_x, 10.0 * delta)
+			camera.rotation.z = lerp(camera.rotation.z, 0.0, 10.0 * delta)
 			return
 
 		# GROUND roll (unchanged): backward = back-flip, sideways = barrel roll, forward = no camera flip,
@@ -1264,8 +1383,11 @@ func update_camera_tilt(delta: float) -> void:
 			amount = deg_to_rad(roll_camera_tilt_degrees) * sin(roll_progress * PI)
 		# No front rolls: only a backward roll pitches the camera. Forward rolls get no flip
 		# (sideways rolls still barrel-roll via the z rotation below).
-		camera.rotation.x = base_camera_rot_x + amount * maxf(local_dir.z, 0.0)
-		camera.rotation.z = -amount * local_dir.x
+		# Spin around ONE axis at the full angle, so diagonals do the whole flip too. (The old per-axis split
+		# scaled each part by the direction's x/z, so a 45° roll only reached ~70% of the spin.)
+		var spin_axis := Vector3(maxf(local_dir.z, 0.0), 0.0, -local_dir.x)
+		if spin_axis.length() > 0.01:
+			camera.basis = Basis(spin_axis.normalized(), amount) * Basis.from_euler(Vector3(base_camera_rot_x, 0.0, 0.0))
 		return
 
 	# NEW: knocked down — camera lists to one side and looks slightly down, easing back to level as you get up.
