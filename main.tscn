@@ -1,9 +1,11 @@
 [gd_scene format=3 uid="uid://cqow47bch5ocs"]
 
 [ext_resource type="Script" uid="uid://b0gd8hrqpvtbb" path="res://player.gd" id="1_ig7tw"]
-[ext_resource type="Script" uid="uid://datjo4mngacbo" path="res://day_night_cycle.gd" id="2_0xm2m"]
+[ext_resource type="Script" uid="uid://b0mqp2rns6nyr" path="res://sky_cycle.gd" id="1_ycdy4"]
 [ext_resource type="Texture2D" uid="uid://dv173pdrq7k6e" path="res://grass.jpg" id="2_1bvp3"]
+[ext_resource type="Texture2D" uid="uid://cue13y5u0k0ke" path="res://sun-1.png.png" id="2_w48qg"]
 [ext_resource type="Texture2D" uid="uid://blg8updhrtu4r" path="res://stone road.jpeg" id="3_h2yge"]
+[ext_resource type="Texture2D" uid="uid://e3jqjhg81uwr" path="res://moon-1.png.png" id="3_vivmo"]
 [ext_resource type="Script" uid="uid://ly8por15wthv" path="res://fps_shooter.gd" id="4_7mycd"]
 [ext_resource type="PackedScene" uid="uid://ctp0o18g7yp8p" path="res://Bullet.tscn" id="5_272bh"]
 [ext_resource type="Shader" uid="uid://bihpdv7a3qjbu" path="res://main.gdshader" id="5_kek77"]
@@ -61,10 +63,11 @@ material = SubResource("StandardMaterial3D_7mycd")
 [node name="Node3D" type="Node3D" unique_id=1205225603]
 
 [node name="DayNightCycle" type="Node3D" parent="." unique_id=1911056165 node_paths=PackedStringArray("sun", "moon")]
-script = ExtResource("2_0xm2m")
+script = ExtResource("1_ycdy4")
 sun = NodePath("../sun")
 moon = NodePath("../moon")
-cycle_speed = 250.0
+sun_texture = ExtResource("2_w48qg")
+moon_texture = ExtResource("3_vivmo")
 
 [node name="sun" type="DirectionalLight3D" parent="." unique_id=1230024567]
 light_energy = 2.0

@@ -9,6 +9,12 @@ extends CharacterBody3D
 @export var crouch_lerp_speed := 10.0
 
 # -------------------------
+# PLAYER SHADOW (NEW) — an invisible capsule that only casts a shadow (first-person has no body mesh)
+# -------------------------
+@export var player_shadow_enabled := true
+var shadow_mesh: MeshInstance3D
+
+# -------------------------
 # GROUND / AIR MOVEMENT (snappy, ULTRAKILL-ish)
 # -------------------------
 @export var ground_accel := 60.0          # how quickly velocity ramps toward target speed
@@ -331,6 +337,31 @@ var shield_flash := 0.0
 var both_flash := 0.0
 var damage_flash_rect: ColorRect
 
+# -------------------------
+# WEAPON CLIP GUARD (NEW) — the gun never pokes through the ground or walls
+# -------------------------
+# Every frame a couple of rays are cast from the camera / gun to the muzzle. If the barrel would end up inside
+# level geometry, the gun is pulled back toward you and tilted up just enough to stay outside it, then eases
+# back out when the way is clear. This is purely visual and is removed before weapon.gd runs each frame,
+# so it never fights the weapon's own ADS / hip-position code.
+@export var weapon_clip_enabled := true
+@export var weapon_clip_margin := 0.12            # extra clearance beyond the muzzle (metres)
+@export var weapon_clip_max_pullback := 0.7       # most the gun will be pulled back (metres)
+@export var weapon_clip_lift := 0.35              # rise per metre of pull-back (keeps it from sinking while pulled in)
+@export var weapon_clip_pitch_up_degrees := 28.0  # tilt up at full pull-back, so the barrel points away from the surface
+@export var weapon_clip_out_speed := 28.0         # how fast it snaps back when something is in the way
+@export var weapon_clip_return_speed := 9.0       # how fast it eases forward again when clear
+@export_flags_3d_physics var weapon_clip_mask := 1  # which physics layers count as "solid" (1 = your level/world)
+
+# Draw the gun on top of the level so it can never visibly poke through anything (no depth test). Applied in code
+# to every material on the gun when the game starts, so you don't need the Inspector setting.
+@export var weapon_draw_on_top := true
+@export var weapon_render_priority := 1           # higher draws later (on top); only matters if several things are drawn on top
+
+var _weapon_clip_amount := 0.0
+var _weapon_clip_pos := Vector3.ZERO   # offset currently applied to the weapon (removed at the start of each frame)
+var _weapon_clip_rot := 0.0
+
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -360,8 +391,15 @@ func _ready() -> void:
 	# ---- give the weapon a reference to this player ----
 	if Weapon:
 		Weapon.player = self
+		# Make the weapon update BEFORE the player each frame, so the clip guard can run after the weapon has
+		# placed itself. The guard's offset is stripped again at the start of the next frame (process_frame).
+		Weapon.process_priority = -100
+		get_tree().process_frame.connect(_remove_weapon_clip)
+		if weapon_draw_on_top:
+			_make_weapon_draw_on_top()
 
 	_build_damage_flash()
+	_build_player_shadow()   # NEW
 
 
 func _input(event: InputEvent) -> void:
@@ -393,6 +431,9 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+	_update_player_shadow()   # NEW
+	_update_weapon_clip(delta)
+
 	# Damage flash: red for health hits, blue for shield hits. Both fade out smoothly.
 	if health_flash > 0.0 or shield_flash > 0.0 or both_flash > 0.0:
 		health_flash = move_toward(health_flash, 0.0, damage_flash_fade * delta)
@@ -822,6 +863,123 @@ func _physics_process(delta: float) -> void:
 	update_fov(delta)
 	update_camera_tilt(delta)
 	apply_headbob(delta)
+
+
+# -------------------------
+# PLAYER SHADOW (NEW)
+# -------------------------
+
+## An invisible capsule that only casts shadows (you never see it, but the sun and moon do).
+func _build_player_shadow() -> void:
+	var shape := collision.shape as CapsuleShape3D
+	if shape == null:
+		return
+	var cap := CapsuleMesh.new()
+	cap.radius = shape.radius
+	cap.height = shape.height
+	shadow_mesh = MeshInstance3D.new()
+	shadow_mesh.mesh = cap
+	shadow_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+	add_child(shadow_mesh)
+
+
+func _update_player_shadow() -> void:
+	if shadow_mesh == null:
+		return
+	var shape := collision.shape as CapsuleShape3D
+	shadow_mesh.visible = player_shadow_enabled and not is_dead
+	var cap := shadow_mesh.mesh as CapsuleMesh
+	if not is_equal_approx(cap.height, shape.height):
+		cap.height = shape.height
+	# Keep the feet on the ground while the capsule shrinks for crouching and rolling.
+	var feet_y := collision.position.y - stand_height * 0.5
+	shadow_mesh.position = Vector3(collision.position.x, feet_y + shape.height * 0.5, collision.position.z)
+
+
+# -------------------------
+# WEAPON CLIP GUARD
+# -------------------------
+
+## Gives every mesh on the gun its own copy of its material with depth testing off, so it always draws over
+## the world. (Copies, so shared or imported materials aren't changed for anything else.)
+func _make_weapon_draw_on_top() -> void:
+	var skipped := 0
+	for node in Weapon.find_children("*", "MeshInstance3D", true, false):
+		var mi := node as MeshInstance3D
+		if mi == null or mi.mesh == null:
+			continue
+		for i in mi.mesh.get_surface_count():
+			var mat := mi.get_active_material(i)
+			if mat is BaseMaterial3D:
+				var copy := mat.duplicate() as BaseMaterial3D
+				copy.no_depth_test = true
+				copy.render_priority = weapon_render_priority
+				mi.set_surface_override_material(i, copy)
+			elif mat != null:
+				skipped += 1
+	if skipped > 0:
+		push_warning("Weapon draw-on-top: %d material(s) aren't StandardMaterial3D/ORMMaterial3D (probably shaders), so they were left alone." % skipped)
+
+
+## Strips last frame's clip offset, so weapon.gd always sees (and lerps from) its own clean position.
+func _remove_weapon_clip() -> void:
+	if Weapon and is_instance_valid(Weapon):
+		if _weapon_clip_pos != Vector3.ZERO or _weapon_clip_rot != 0.0:
+			Weapon.position -= _weapon_clip_pos
+			Weapon.rotation.x -= _weapon_clip_rot
+	_weapon_clip_pos = Vector3.ZERO
+	_weapon_clip_rot = 0.0
+
+
+func _update_weapon_clip(delta: float) -> void:
+	var w := Weapon as Node3D
+	if w == null or not is_instance_valid(w) or camera == null:
+		return
+
+	var target := 0.0
+	if weapon_clip_enabled and not is_dead:
+		target = _weapon_clip_needed(w)
+
+	var rate := weapon_clip_out_speed if target > _weapon_clip_amount else weapon_clip_return_speed
+	_weapon_clip_amount = lerpf(_weapon_clip_amount, target, 1.0 - exp(-rate * delta))
+	if _weapon_clip_amount < 0.0005:
+		_weapon_clip_amount = 0.0
+		return
+
+	# The weapon is a child of the camera, so +Z is "back toward your face".
+	var frac := _weapon_clip_amount / maxf(weapon_clip_max_pullback, 0.001)
+	_weapon_clip_pos = Vector3(0.0, _weapon_clip_amount * weapon_clip_lift, _weapon_clip_amount)
+	_weapon_clip_rot = deg_to_rad(weapon_clip_pitch_up_degrees) * frac
+	w.position += _weapon_clip_pos
+	w.rotation.x += _weapon_clip_rot
+
+
+## How far (metres) the muzzle currently sits inside solid geometry, found with rays from the camera and from the
+## gun's own origin out to the muzzle (plus a small margin). 0 = clear.
+func _weapon_clip_needed(w: Node3D) -> float:
+	var muzzle_node := w.get_node_or_null("muzzlePoint") as Node3D
+	var tip: Vector3
+	if muzzle_node:
+		tip = muzzle_node.global_position
+	else:
+		tip = w.global_position + (-w.global_transform.basis.z).normalized() * 0.8
+
+	var space := get_world_3d().direct_space_state
+	var starts: Array[Vector3] = [camera.global_position, w.global_position]
+	var worst := 0.0
+	for start in starts:
+		var seg: Vector3 = tip - start
+		var seg_len := seg.length()
+		if seg_len < 0.01:
+			continue
+		var end: Vector3 = tip + seg / seg_len * weapon_clip_margin
+		var q := PhysicsRayQueryParameters3D.create(start, end)
+		q.exclude = [get_rid()]
+		q.collision_mask = weapon_clip_mask
+		var hit := space.intersect_ray(q)
+		if not hit.is_empty():
+			worst = maxf(worst, end.distance_to(hit.position))
+	return clampf(worst, 0.0, weapon_clip_max_pullback)
 
 
 # -------------------------

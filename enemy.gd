@@ -29,6 +29,16 @@ var face_original_material: Material = null
 @export var gravity := 9.8
 
 # =========================
+# LOOK TOWARD A SHOT (NEW)
+# =========================
+# When shot and it can't already see you, the enemy turns to face where the shot came from and looks around.
+# If you're in its sight (range, angle and clear line) it goes after you. If not, it just keeps looking, then settles down.
+@export var hit_look_time := 2.5          # seconds it keeps staring toward the shot before giving up
+@export var hit_look_turn_speed := 8.0    # how fast it turns toward the shooter (higher = snappier)
+var look_timer := 0.0
+var look_target := Vector3.ZERO           # world position of whoever shot it
+
+# =========================
 # ATTACK (telegraphed lunge)
 # =========================
 @export var attack_range := 2.6          # starts an attack when the player is this close (flat distance)
@@ -138,7 +148,7 @@ var spawn_rotation: Vector3 = Vector3.ZERO
 # =========================
 # STATE
 # =========================
-enum State { IDLE, ALERT, CHASING, ATTACKING }
+enum State { IDLE, ALERT, CHASING, ATTACKING, LOOKING }   # LOOKING = NEW: turned toward a shot, scanning for you
 var state: State = State.IDLE
 var player: Node3D = null
 var last_known_position: Vector3 = Vector3.ZERO
@@ -214,6 +224,14 @@ func _physics_process(delta: float) -> void:
 				state = State.ALERT
 		State.ATTACKING:
 			_process_attack(delta)
+		State.LOOKING:
+			# NEW: stand still, turn toward the shot and watch. Seeing you (in _check_detection) flips this to CHASING.
+			velocity.x = move_toward(velocity.x, 0.0, move_accel * 2.0 * delta)
+			velocity.z = move_toward(velocity.z, 0.0, move_accel * 2.0 * delta)
+			_face_position(look_target, hit_look_turn_speed, delta)
+			look_timer -= delta
+			if look_timer <= 0.0:
+				state = State.IDLE
 
 	if is_flashing:
 		flash_timer -= delta
@@ -235,6 +253,9 @@ func _check_detection() -> void:
 	if can_see_player:
 		state = State.CHASING
 		last_known_position = player.global_position
+		return
+	# NEW: while looking toward a shot, only actually SEEING you makes it come after you (no sound detection).
+	if state == State.LOOKING:
 		return
 	var dist = global_position.distance_to(player.global_position)
 	var is_crouching = player.get("is_crouching") == true
@@ -473,6 +494,11 @@ func take_damage(amount: float, hit_point: Vector3, shooter: Node) -> void:
 		away.y = 0.0
 		if away.length() > 0.05:
 			last_hit_dir = away.normalized()
+		# NEW: turn toward whoever shot us (unless we're mid-attack or already chasing something we can see).
+		if state != State.ATTACKING and not (state == State.CHASING and can_see_player):
+			look_target = (shooter as Node3D).global_position
+			look_timer = hit_look_time
+			state = State.LOOKING
 	jelly_vel += Vector3(0.6, -1.0, 0.6) * hit_squash * 12.0   # jiggle when hit
 	_start_flash()
 	if health <= 0.0:
@@ -825,6 +851,7 @@ func _respawn() -> void:
 	lean_z = 0.0
 	bob_offset = 0.0
 	last_hit_dir = Vector3.ZERO
+	look_timer = 0.0
 
 	is_dead = false
 	is_fading = false
