@@ -137,6 +137,13 @@ signal roll_wall_bounced # NEW: a roll hit a wall and kicked you off it
 @export var roll_fov_change := -4.0           # FOV added during a ground roll (negative = narrower)
 @export var roll_fov_kick := 6.0              # NEW: extra FOV that follows the speed surge, so the launch feels fast
 @export var ground_roll_surge := 0.25         # NEW: extra speed at the start of a ground roll, as a fraction of its speed
+# NEW: the camera flips around the edge of your body on the side you roll toward (right roll = right edge,
+# back roll = back edge), instead of spinning on the spot.
+@export var roll_pivot_edge_scale := 1.0      # how far out the pivot sits: 1 = the body's edge, 0 = old spin-on-the-spot
+@export var roll_pivot_height_offset := 0.0   # pivot height relative to the camera (metres; negative = lower, like the shoulder/hip)
+@export var roll_camera_min_height := 0.45    # the camera never drops below this height above your feet during a roll (raise it if it still clips)
+
+var _roll_cam_offset := Vector3.ZERO           # camera shift currently applied for the pivot (removed before the camera is repositioned)
 
 # -------------------------
 # AIR ROLL (NEW) — easier on the eyes than the ground roll
@@ -1161,6 +1168,7 @@ func respawn() -> void:
 	# Undo the death-cam and crouch squash.
 	camera.rotation = Vector3(base_camera_rot_x, 0.0, 0.0)
 	camera.position = base_camera_pos
+	_roll_cam_offset = Vector3.ZERO
 	var shape = collision.shape as CapsuleShape3D
 	if shape:
 		shape.height = stand_height
@@ -1519,6 +1527,9 @@ func update_fov(delta: float) -> void:
 # CAMERA TILT
 # -------------------------
 func update_camera_tilt(delta: float) -> void:
+	# NEW: take off last frame's roll-pivot shift first, so the camera position is clean before anything else touches it.
+	_clear_roll_cam_offset()
+
 	# Roll camera.
 	if is_rolling:
 		var local_dir := global_transform.basis.inverse() * dash_direction
@@ -1545,7 +1556,30 @@ func update_camera_tilt(delta: float) -> void:
 		# scaled each part by the direction's x/z, so a 45° roll only reached ~70% of the spin.)
 		var spin_axis := Vector3(maxf(local_dir.z, 0.0), 0.0, -local_dir.x)
 		if spin_axis.length() > 0.01:
-			camera.basis = Basis(spin_axis.normalized(), amount) * Basis.from_euler(Vector3(base_camera_rot_x, 0.0, 0.0))
+			var axis_n := spin_axis.normalized()
+			var spin := Basis(axis_n, amount)
+			camera.basis = spin * Basis.from_euler(Vector3(base_camera_rot_x, 0.0, 0.0))
+
+			# NEW: pivot on the body's edge on the side being rolled toward. The axis is horizontal and perpendicular
+			# to that side, so the edge point is simply the (side) direction pushed out by the capsule radius.
+			var shape := collision.shape as CapsuleShape3D
+			if shape and roll_pivot_edge_scale > 0.0:
+				var edge_dir := Vector3(local_dir.x, 0.0, maxf(local_dir.z, 0.0)).normalized()
+				var pivot := edge_dir * shape.radius * roll_pivot_edge_scale
+				pivot.y = camera.position.y + roll_pivot_height_offset
+				# Orbit the camera's resting position around the pivot by the same rotation as the camera itself.
+				var rest := camera.position
+				_roll_cam_offset = (pivot + spin * (rest - pivot)) - rest
+				camera.position += _roll_cam_offset
+
+				# Keep the camera above the ground: if the swing would dip below the clearance height (measured up
+				# from your feet), lift it by the shortfall. Done in world space, then converted back to head space.
+				var feet_y := global_position.y + collision.position.y - shape.height * 0.5   # the capsule's real bottom (it shrinks while rolling)
+				var shortfall := (feet_y + roll_camera_min_height) - camera.global_position.y
+				if shortfall > 0.0:
+					var lift := head.global_transform.basis.inverse() * Vector3(0.0, shortfall, 0.0)
+					_roll_cam_offset += lift
+					camera.position += lift
 		return
 
 	# NEW: knocked down — camera lists to one side and looks slightly down, easing back to level as you get up.
@@ -1582,7 +1616,16 @@ func update_camera_tilt(delta: float) -> void:
 # -------------------------
 # CROUCH
 # -------------------------
+## NEW: removes the camera shift that the roll pivot added last frame (a no-op when there isn't one).
+func _clear_roll_cam_offset() -> void:
+	if _roll_cam_offset != Vector3.ZERO:
+		camera.position -= _roll_cam_offset
+		_roll_cam_offset = Vector3.ZERO
+
+
 func handle_crouch(delta: float) -> void:
+	_clear_roll_cam_offset()   # NEW: so the crouch height lerp works on the real camera position, not the pivot-shifted one
+
 	var shape = collision.shape as CapsuleShape3D
 	if not shape:
 		return

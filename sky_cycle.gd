@@ -25,9 +25,10 @@ extends Node3D
 # -------------------------
 @export var sun_aura_color := Color(1.0, 0.7, 0.25)
 @export var moon_aura_color := Color(0.25, 0.95, 0.65)
-@export var aura_size_degrees := 7.0          # how far the glow spreads out past the sprite's edge
-@export var aura_intensity := 0.8             # overall strength of the glow
-@export var aura_falloff := 2.0               # higher = glow stays tight to the object, lower = spreads wider and flatter
+@export var aura_size_degrees := 16.0         # how far the tint spreads out past the sprite's edge (bigger = wider, softer vignette)
+@export var aura_intensity := 0.35            # overall strength of the tint (0 = off)
+@export_range(0.0, 1.0) var moon_aura_strength := 0.25   # moon glow as a fraction of the sun's (0.25 = a quarter as strong, 0 = no moon glow)
+@export var aura_falloff := 1.5               # higher = tint stays tight to the object, lower = spreads wider and flatter
 
 # -------------------------
 # STARS — drawn right in the sky, so they always surround you and twinkle
@@ -189,8 +190,9 @@ void sky() {
 	}
 
 	// Soft hue around the sun and the moon (your sprites are drawn on top of this).
-	col += sun_aura_color * aura_shape(dir, sun_dir, sun_radius) * sun_aura_amount;
-	col += moon_aura_color * aura_shape(dir, moon_dir, moon_radius) * moon_aura_amount;
+	// Blended in (not added), so it tints the sky like a soft vignette instead of brightening it.
+	col = mix(col, sun_aura_color, clamp(aura_shape(dir, sun_dir, sun_radius) * sun_aura_amount, 0.0, 1.0));
+	col = mix(col, moon_aura_color, clamp(aura_shape(dir, moon_dir, moon_radius) * moon_aura_amount, 0.0, 1.0));
 
 	COLOR = col * sky_energy;
 }
@@ -445,7 +447,7 @@ func update_sky_colors(height: float, to_sun: Vector3, to_moon: Vector3, sun_alp
 	sky_mat.set_shader_parameter("sun_aura_color", sun_aura_color)
 	sky_mat.set_shader_parameter("moon_aura_color", moon_aura_color)
 	sky_mat.set_shader_parameter("sun_aura_amount", sun_alpha * aura_intensity)
-	sky_mat.set_shader_parameter("moon_aura_amount", moon_alpha * aura_intensity)
+	sky_mat.set_shader_parameter("moon_aura_amount", moon_alpha * aura_intensity * moon_aura_strength)
 	sky_mat.set_shader_parameter("sun_radius", deg_to_rad(sun_size_degrees * 0.5))
 	sky_mat.set_shader_parameter("moon_radius", deg_to_rad(moon_size_degrees * 0.5))
 	sky_mat.set_shader_parameter("aura_size", deg_to_rad(aura_size_degrees))

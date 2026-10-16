@@ -35,7 +35,9 @@ var face_original_material: Material = null
 # If you're in its sight (range, angle and clear line) it goes after you. If not, it just keeps looking, then settles down.
 @export var hit_look_time := 2.5          # seconds it keeps staring toward the shot before giving up
 @export var hit_look_turn_speed := 8.0    # how fast it turns toward the shooter (higher = snappier)
+@export var behind_shot_deaf_time := 6.0  # shot from behind: for this long it ignores footstep noise, so it has to actually SEE you
 var look_timer := 0.0
+var deaf_timer := 0.0                     # counts down; while > 0 sound detection is off
 var look_target := Vector3.ZERO           # world position of whoever shot it
 
 # =========================
@@ -199,6 +201,7 @@ func _physics_process(delta: float) -> void:
 		return
 
 	attack_cooldown_timer = max(attack_cooldown_timer - delta, 0.0)
+	deaf_timer = max(deaf_timer - delta, 0.0)
 
 	if not is_on_floor():
 		velocity.y -= gravity * delta
@@ -255,7 +258,7 @@ func _check_detection() -> void:
 		last_known_position = player.global_position
 		return
 	# NEW: while looking toward a shot, only actually SEEING you makes it come after you (no sound detection).
-	if state == State.LOOKING:
+	if state == State.LOOKING or deaf_timer > 0.0:
 		return
 	var dist = global_position.distance_to(player.global_position)
 	var is_crouching = player.get("is_crouching") == true
@@ -499,6 +502,13 @@ func take_damage(amount: float, hit_point: Vector3, shooter: Node) -> void:
 			look_target = (shooter as Node3D).global_position
 			look_timer = hit_look_time
 			state = State.LOOKING
+			# NEW: shot from behind (outside its view cone) = it can't "hear" you into chasing; it must turn and see you.
+			var to_shooter := look_target - global_position
+			to_shooter.y = 0.0
+			if to_shooter.length() > 0.05:
+				var shot_angle := rad_to_deg((-global_transform.basis.z).angle_to(to_shooter.normalized()))
+				if shot_angle > sight_angle:
+					deaf_timer = behind_shot_deaf_time
 	jelly_vel += Vector3(0.6, -1.0, 0.6) * hit_squash * 12.0   # jiggle when hit
 	_start_flash()
 	if health <= 0.0:
@@ -852,6 +862,7 @@ func _respawn() -> void:
 	bob_offset = 0.0
 	last_hit_dir = Vector3.ZERO
 	look_timer = 0.0
+	deaf_timer = 0.0
 
 	is_dead = false
 	is_fading = false
