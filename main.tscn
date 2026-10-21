@@ -2,9 +2,7 @@
 
 [ext_resource type="Script" uid="uid://b0gd8hrqpvtbb" path="res://player.gd" id="1_ig7tw"]
 [ext_resource type="Script" uid="uid://b0mqp2rns6nyr" path="res://sky_cycle.gd" id="1_ycdy4"]
-[ext_resource type="Texture2D" uid="uid://dv173pdrq7k6e" path="res://grass.jpg" id="2_1bvp3"]
 [ext_resource type="Texture2D" uid="uid://cue13y5u0k0ke" path="res://sun-1.png.png" id="2_w48qg"]
-[ext_resource type="Texture2D" uid="uid://blg8updhrtu4r" path="res://stone road.jpeg" id="3_h2yge"]
 [ext_resource type="Texture2D" uid="uid://e3jqjhg81uwr" path="res://moon-1.png.png" id="3_vivmo"]
 [ext_resource type="Script" uid="uid://ly8por15wthv" path="res://fps_shooter.gd" id="4_7mycd"]
 [ext_resource type="PackedScene" uid="uid://ctp0o18g7yp8p" path="res://Bullet.tscn" id="5_272bh"]
@@ -12,7 +10,10 @@
 [ext_resource type="PackedScene" uid="uid://bedx1j3hu5jxc" path="res://hud.tscn" id="6_4c57u"]
 [ext_resource type="PackedScene" uid="uid://2oqfqxx5b61g" path="res://Enemy.tscn" id="7_272bh"]
 [ext_resource type="Script" uid="uid://ba78l2d86fryr" path="res://crosshair.gd" id="8_5vw27"]
+[ext_resource type="Texture2D" uid="uid://bhevcdqpvbber" path="res://grass_seamless.png" id="8_ycdy4"]
+[ext_resource type="Texture2D" uid="uid://c3bevnjgxd0af" path="res://stone.png" id="9_ycdy4"]
 [ext_resource type="Script" uid="uid://bo6n1i5qobckv" path="res://hud.gd" id="11_efxa6"]
+[ext_resource type="Script" uid="uid://db06uymfyne32" path="res://natural_lighting.gd" id="14_w48qg"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
 
@@ -42,21 +43,27 @@ shader_parameter/squint_tint_color = Color(0.35, 0.05, 0.04, 1)
 
 [sub_resource type="NavigationMesh" id="NavigationMesh_7mycd"]
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_272bh"]
-albedo_texture = ExtResource("2_1bvp3")
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_w48qg"]
+albedo_texture = ExtResource("8_ycdy4")
+uv1_scale = Vector3(0.25, 0.25, 0.25)
+uv1_triplanar = true
+uv1_world_triplanar = true
 
 [sub_resource type="BoxMesh" id="BoxMesh_5vw27"]
-material = SubResource("StandardMaterial3D_272bh")
+material = SubResource("StandardMaterial3D_w48qg")
 size = Vector3(115, 1, 115)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_kek77"]
 size = Vector3(115, 1, 115)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_7mycd"]
-albedo_texture = ExtResource("3_h2yge")
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_vivmo"]
+albedo_texture = ExtResource("9_ycdy4")
+uv1_scale = Vector3(0.25, 0.25, 0.25)
+uv1_triplanar = true
+uv1_world_triplanar = true
 
 [sub_resource type="BoxMesh" id="BoxMesh_272bh"]
-material = SubResource("StandardMaterial3D_7mycd")
+material = SubResource("StandardMaterial3D_vivmo")
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_5vw27"]
 
@@ -135,11 +142,11 @@ shape = SubResource("BoxShape3D_kek77")
 [node name="wall" type="StaticBody3D" parent="." unique_id=2131724013]
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="wall" unique_id=1041174456]
-transform = Transform3D(50, 0, 0, 0, -0.12687176, -9.996779, 0, 4.9983897, -0.25374353, 0, 5.9003887, 28.262493)
+transform = Transform3D(115.83347, 0, 0, 0, -0.12687176, -9.996779, 0, 4.9983897, -0.25374353, 0, 5.360322, 28.262493)
 mesh = SubResource("BoxMesh_272bh")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="wall" unique_id=2104454541]
-transform = Transform3D(50, 0, 0, 0, -0.12687176, -9.996779, 0, 4.9983897, -0.25374353, 0, 5.9003887, 28.262493)
+transform = Transform3D(115.83347, 0, 0, 0, -0.12687176, -9.996779, 0, 4.9983897, -0.25374353, 0, 5.360322, 28.262493)
 shape = SubResource("BoxShape3D_5vw27")
 
 [node name="enemy" parent="." unique_id=1990476701 instance=ExtResource("7_272bh")]
@@ -194,3 +201,6 @@ offset_bottom = 1.0
 script = ExtResource("11_efxa6")
 
 [node name="Node" type="Node" parent="." unique_id=1451125049]
+
+[node name="natural_lighting" type="Node" parent="." unique_id=1817627444]
+script = ExtResource("14_w48qg")
