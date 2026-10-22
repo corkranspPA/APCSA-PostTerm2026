@@ -21,10 +21,10 @@ extends Node3D
 @export var sprite_distance := 900.0          # must be LESS than your camera's Far value (default 4000)
 
 # -------------------------
-# AURA (CHANGED) — a soft coloured hue around the sun and the moon, no ring, no hard edges
+# AURA — a soft coloured hue around the sun and the moon, no ring, no hard edges
 # -------------------------
 @export var sun_aura_color := Color(1.0, 0.7, 0.25)
-@export var moon_aura_color := Color(0.25, 0.95, 0.65)
+@export var moon_aura_color := Color(0.16, 0.72, 0.45)   # the moon's ring: a mix of jade (#00A86B) and emerald (#50C878)
 @export var aura_size_degrees := 16.0         # how far the tint spreads out past the sprite's edge (bigger = wider, softer vignette)
 @export var aura_intensity := 0.35            # overall strength of the tint (0 = off)
 @export_range(0.0, 1.0) var moon_aura_strength := 0.25   # moon glow as a fraction of the sun's (0.25 = a quarter as strong, 0 = no moon glow)
@@ -64,7 +64,7 @@ extends Node3D
 @export var moon_energy := 0.6
 
 # -------------------------
-# AMBIENT / SKY LOOK
+# AMBIENT / SKY LOOK (the raw colours; the dusk grade below is applied on top of these)
 # -------------------------
 @export var day_ambient_energy := 0.8
 @export var night_ambient_energy := 0.18      # raise this if nights are too dark to see
@@ -78,7 +78,91 @@ extends Node3D
 @export var glow_spread := 3.0                # sunrise/sunset glow: higher = narrower patch around the sun
 @export var glow_height := 6.0                # higher = glow hugs the horizon more tightly
 
+# =====================================================================================================
+# NATURAL DUSK LIGHTING (merged in from natural_dusk.gd; no fog). Every part of the light is driven by how high
+# the sun is: low sun = long shadows, dried-blood red-orange light, cool fill, warm ground bounce. Bloodborne-style
+# greyed colours by day, greyed moonlit blue by night. Runs inside this script, right after the sky values are set.
+# =====================================================================================================
+@export_group("Dusk look")
+@export var dusk_look_enabled := true              # master switch: off = the raw sky_cycle look, nothing graded
+@export_range(0.0, 1.0) var dusk_strength := 1.0   # 0 = off, 1 = full dusk look
+@export_range(0.1, 1.0) var dusk_max_height := 0.45 # caps how "high noon" the grading ever gets (lower = warmer all day)
+@export_range(0.0, 1.0) var color_muting := 0.2    # 0 = original vibrant colours, 1 = grey light
+
+@export_group("Dusk: day / night grade")
+@export var day_tint := Color(0.76, 0.74, 0.7)              # faint sepia-grey the daytime light is pulled toward
+@export_range(0.0, 1.0) var day_tint_amount := 0.35
+@export_range(0.0, 1.0) var day_extra_greying := 0.2        # extra greying on top of color_muting, daytime only
+@export var day_ambient_color := Color(0.42, 0.47, 0.56)    # cool slate-blue fill in the shadows by day
+@export var day_saturation := 0.85                          # overall picture saturation by day
+@export var night_ambient_color := Color(0.15, 0.16, 0.2)   # grey-blue fill in the shadows by night
+@export var night_moon_color := Color(0.68, 0.7, 0.76)      # near-grey pale blue moonlight
+@export_range(0.0, 1.0) var night_moon_color_amount := 1.0  # 0 = keep moon_light_color (green), 1 = fully night_moon_color
+@export_range(0.0, 1.0) var night_glow_light_amount := 0.9  # how much the moon-glow and star lights turn to the same pale blue
+@export_range(0.0, 1.0) var night_moon_greying := 0.8       # dulls the moonlight and the moon-glow / star lights (higher = greyer)
+@export var night_saturation := 0.5                         # overall picture saturation by night (lower = greyer)
+
+@export_group("Dusk: sky grade")
+@export var grade_sky := true                               # gives the sky, glow and aura colours the same hue
+@export_range(0.0, 1.0) var sky_greying := 0.2
+@export_range(0.0, 1.0) var sky_night_extra_greying := 0.6  # extra greying of the night sky and glow (night only)
+@export_range(0.0, 1.0) var moon_ring_night_greying := 0.3  # lightly mutes the moon's jade/emerald ring at night (0 = full colour)
+@export var sky_day_tint := Color(0.78, 0.74, 0.68)
+@export_range(0.0, 1.0) var sky_day_tint_amount := 0.18
+@export var sky_night_tint := Color(0.2, 0.23, 0.3)
+@export_range(0.0, 1.0) var sky_night_tint_amount := 0.35
+@export_range(0.0, 1.0) var sky_moon_aura_to_blue := 0.9    # turns the green glow around the moon pale blue
+@export_range(0.0, 1.0) var sky_blood_glow := 0.25          # pulls the sunset glow toward dried-blood red
+
+@export_group("Dusk: sun and fill light")
+@export var sun_color_ramp: Gradient                        # sun colour by height (left = horizon/twilight, right = high sun)
+@export var sun_brightness := 0.65                          # sun strength multiplier
+@export var moon_brightness := 0.7                          # moon strength multiplier (colour is set by night_moon_color)
+@export var ambient_color_ramp: Gradient                    # shadow fill colour by sun height
+@export var ambient_energy_low := 0.55
+@export var ambient_energy_high := 0.9
+@export var sky_fill_color := Color(0.42, 0.5, 0.68)        # cold slate light from above
+@export var sky_fill_energy := 0.18
+@export var ground_bounce_color := Color(0.8, 0.42, 0.26)   # dull dried-blood glow bouncing up off the ground
+@export var ground_bounce_energy := 0.22
+
+@export_group("Dusk: shadows")
+@export var shadow_max_distance := 120.0
+@export var shadow_blur := 1.6
+@export var shadow_bias := 0.04
+@export var shadow_normal_bias := 1.5
+@export var penumbra_low_sun := 2.2                         # soft shadow edge (degrees) with the sun on the horizon
+@export var penumbra_high_sun := 1.0
+
+@export_group("Dusk: colour / contact shadows / glow")
+@export var exposure := 0.9
+@export var tonemap_white := 6.0
+@export var saturation := 0.82                              # dusk saturation (day and night have their own above)
+@export var contrast := 0.98
+@export var ssao_enabled := true
+@export var ssil_enabled := true                            # cheap screen-space bounce light
+@export var sdfgi_enabled := false                          # real bounce light everywhere; Forward+ only, costs more
+@export var glow_enabled := true
+@export var glow_intensity := 0.45
+@export var glow_hdr_threshold := 1.0
+
+# -------------------------
+# NIGHT VISION — a gentle help so you can still see at night. It only works when the sun is down.
+# -------------------------
+@export_group("Night vision")
+@export var night_vision_enabled := true
+@export_range(0.0, 1.0) var night_vision_strength := 0.6    # 0 = off, 1 = strong. Raise this if nights are still too dark.
+@export var night_vision_ambient_boost := 0.5               # extra shadow-fill light at night (at strength 1)
+@export var night_vision_exposure_boost := 0.5              # brightens the whole picture a little at night (at strength 1)
+@export var night_vision_light_energy := 0.8                # soft pale light around the player (at strength 1)
+@export var night_vision_light_range := 18.0                # how far that light reaches, in metres
+@export var night_vision_color := Color(0.74, 0.76, 0.82)   # near-neutral pale grey, so the area around you is grey
+@export var night_vision_toggle_action := ""                # optional: an Input Map action name that switches it on/off (e.g. "night_vision")
+
 var time: float = 0.0
+var _nv_light: OmniLight3D
+var _nv_base_exposure := -1.0
+var _nv_on := true
 
 var sun_sprite: Sprite3D
 var moon_sprite: Sprite3D
@@ -88,6 +172,9 @@ var halo_base_scale := Vector3.ONE
 var sun_aura_light: DirectionalLight3D
 var moon_aura_light: DirectionalLight3D
 var star_light: DirectionalLight3D
+
+var _sky_fill: DirectionalLight3D
+var _bounce: DirectionalLight3D
 
 
 # The sky itself. Written as a shader so the sunrise glow can sit on ONE side of the sky (where the sun is),
@@ -229,6 +316,8 @@ func _ready() -> void:
 	star_light = _make_dim_light(star_light_color)
 
 	_setup_environment()
+	_setup_dusk()
+	_setup_night_vision()
 	update_sun_and_moon()
 
 
@@ -335,6 +424,9 @@ func _make_dim_light(color: Color) -> DirectionalLight3D:
 # LOOP
 # -------------------------
 func _process(delta: float) -> void:
+	if night_vision_toggle_action != "" and InputMap.has_action(night_vision_toggle_action) \
+	and Input.is_action_just_pressed(night_vision_toggle_action):
+		_nv_on = not _nv_on
 	if running:
 		time = fposmod(time + delta / maxf(cycle_speed, 0.01), 1.0)
 	update_sun_and_moon()
@@ -382,6 +474,10 @@ func update_sun_and_moon() -> void:
 	update_night_darkness(height)
 	update_sky_colors(height, to_sun, to_moon, sun_alpha, moon_alpha, moon_amount)
 	update_dim_lights(to_sun, to_moon, side, sun_amount, moon_amount)
+
+	# ---------------- DUSK GRADE (on top of everything set above, same frame, so nothing builds up) ----------------
+	_apply_dusk_grade(to_sun)
+	_update_night_vision(to_sun)
 
 	# ---------------- THINGS THAT FOLLOW THE CAMERA ----------------
 	var cam := get_viewport().get_camera_3d()
@@ -523,3 +619,232 @@ func update_moon_halo(height: float, to_moon: Vector3, cam_pos: Vector3) -> void
 	moon_halo.global_position = cam_pos + to_moon * (sprite_distance + 5.0)
 	if absf(to_moon.dot(Vector3.UP)) < 0.99:
 		moon_halo.look_at(cam_pos, Vector3.UP)
+
+
+# =====================================================================================================
+# 🌆 NATURAL DUSK (merged from natural_dusk.gd)
+# =====================================================================================================
+
+## One-time setup: default colour ramps, the post-processing look (tone mapping, contact shadows, glow), soft
+## shadows on the sun and moon, and two dim fill lights. Fog is always switched off.
+func _setup_dusk() -> void:
+	if not dusk_look_enabled:
+		return
+	_make_default_ramps()
+	_apply_dusk_environment()
+	_apply_shadows(sun)
+	_apply_shadows(moon)
+	_sky_fill = _make_fill("SkyFill", -90.0)    # shines down
+	_bounce = _make_fill("GroundBounce", 90.0)  # shines up
+
+
+func _apply_dusk_environment() -> void:
+	if world_env == null or world_env.environment == null:
+		push_warning("sky_cycle (dusk): no WorldEnvironment found, so only the light and shadow settings were applied.")
+		return
+	var env := world_env.environment
+
+	env.fog_enabled = false
+	env.volumetric_fog_enabled = false
+
+	env.tonemap_mode = Environment.TONE_MAPPER_ACES
+	env.tonemap_white = tonemap_white
+	env.tonemap_exposure = exposure
+	env.adjustment_enabled = true
+	env.adjustment_saturation = saturation
+	env.adjustment_contrast = contrast
+
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	env.ambient_light_sky_contribution = 0.55          # the rest comes from the ambient colour set each frame
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+
+	env.ssao_enabled = ssao_enabled
+	env.ssao_radius = 1.6
+	env.ssao_intensity = 2.0
+	env.ssao_light_affect = 0.15
+	env.ssil_enabled = ssil_enabled
+	env.sdfgi_enabled = sdfgi_enabled
+	if sdfgi_enabled:
+		env.sdfgi_use_occlusion = true
+
+	env.glow_enabled = glow_enabled
+	env.glow_intensity = glow_intensity
+	env.glow_bloom = 0.08
+	env.glow_hdr_threshold = glow_hdr_threshold
+
+
+func _apply_shadows(light: DirectionalLight3D) -> void:
+	if light == null:
+		return
+	light.shadow_enabled = true
+	light.directional_shadow_max_distance = shadow_max_distance
+	light.shadow_blur = shadow_blur
+	light.shadow_bias = shadow_bias
+	light.shadow_normal_bias = shadow_normal_bias
+	light.directional_shadow_blend_splits = true
+	light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
+
+
+func _make_fill(node_name: String, pitch_degrees: float) -> DirectionalLight3D:
+	var l := DirectionalLight3D.new()
+	l.name = node_name
+	l.shadow_enabled = false
+	l.light_specular = 0.0
+	l.light_energy = 0.0
+	l.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
+	add_child(l)
+	l.global_rotation_degrees = Vector3(pitch_degrees, 0.0, 0.0)
+	l.light_color = sky_fill_color if pitch_degrees < 0.0 else ground_bounce_color
+	return l
+
+
+## Every frame, right after the raw sun/moon/sky values are written: re-colour everything by how high the sun is.
+func _apply_dusk_grade(to_sun: Vector3) -> void:
+	if not dusk_look_enabled or sun == null or _sky_fill == null:
+		return
+	var k := clampf(dusk_strength, 0.0, 1.0)
+
+	# Sun height: 0 at/below the horizon, 1 straight overhead; capped so the look never goes to white noon.
+	var height := clampf(to_sun.y, 0.0, 1.0)
+	var t := minf(height / maxf(dusk_max_height, 0.01), 1.0)
+	var up := smoothstep(-0.12, 0.2, to_sun.y)                       # 0 once the sun is well below the horizon
+	var day_w := smoothstep(0.35, 1.0, t) * k                        # 1 in full daylight, 0 at dusk and night
+	var night_w := (1.0 - smoothstep(-0.15, 0.08, to_sun.y)) * k     # 1 once the sun is below the horizon
+
+	# Sun: colour and strength follow its height
+	var sun_col := _mute(sun_color_ramp.sample(t))
+	sun_col = sun_col.lerp(day_tint, day_w * day_tint_amount)
+	sun_col = _grey(sun_col, day_w * day_extra_greying)
+	sun.light_color = sun.light_color.lerp(sun_col, k)
+	sun.light_energy *= lerpf(1.0, sun_brightness, k)
+	sun.light_angular_distance = lerpf(penumbra_low_sun, penumbra_high_sun, t)
+
+	# Moon: greyed pale blue instead of green
+	if moon:
+		moon.light_energy *= lerpf(1.0, moon_brightness, k)
+		moon.light_color = moon.light_color.lerp(night_moon_color, night_moon_color_amount * night_w)
+		moon.light_color = _grey(moon.light_color, night_moon_greying * night_w)
+
+	# The moon-glow and star lights follow the same pale blue at night
+	for l in [sun_aura_light, moon_aura_light, star_light]:
+		if l:
+			l.light_color = l.light_color.lerp(night_moon_color, night_glow_light_amount * night_w)
+			l.light_color = _grey(l.light_color, night_moon_greying * night_w)   # same greying as the moonlight itself
+
+	# Fill lights fade out with the sun, so night stays dark
+	_sky_fill.light_energy = sky_fill_energy * up * k
+	_bounce.light_energy = ground_bounce_energy * up * k * lerpf(1.0, 0.5, t)
+	_sky_fill.light_color = _grey(_mute(sky_fill_color).lerp(day_tint, day_w * day_tint_amount), day_w * day_extra_greying)
+	_bounce.light_color = _grey(_mute(ground_bounce_color.lerp(sun_color_ramp.sample(t), 0.35)), day_w * day_extra_greying)
+
+	# Ambient fill + overall saturation
+	if world_env and world_env.environment:
+		var env := world_env.environment
+		var amb := _mute(ambient_color_ramp.sample(t))
+		amb = amb.lerp(day_ambient_color, day_w)
+		amb = amb.lerp(night_ambient_color, night_w)
+		env.ambient_light_color = amb
+		env.ambient_light_energy = lerpf(ambient_energy_low, ambient_energy_high, t)
+		var sat := saturation
+		sat = lerpf(sat, day_saturation, day_w)
+		sat = lerpf(sat, night_saturation, night_w)
+		env.adjustment_saturation = sat
+
+	if grade_sky:
+		_grade_sky_colors(day_w, night_w)
+
+
+## Re-tints the sky colours that update_sky_colors just wrote this frame.
+func _grade_sky_colors(day_w: float, night_w: float) -> void:
+	if sky_mat == null:
+		return
+	for param in ["top_color", "horizon_color", "ground_color", "glow_color", "sun_aura_color", "moon_aura_color"]:
+		var v = sky_mat.get_shader_parameter(param)
+		if not (v is Color):
+			continue
+		if param == "moon_aura_color":
+			# the moon's ring stays jade/emerald (never tinted blue), only lightly muted at night
+			sky_mat.set_shader_parameter(param, _grey(v, moon_ring_night_greying * night_w))
+			continue
+		var c: Color = _grey(v, sky_greying)
+		c = c.lerp(sky_day_tint, sky_day_tint_amount * day_w)
+		c = c.lerp(sky_night_tint, sky_night_tint_amount * night_w)
+		if param == "glow_color":
+			c = c.lerp(Color(0.62, 0.1, 0.08), sky_blood_glow)
+		# Night only: grey the sky and glow a bit further so the night sky is slightly grey like the day.
+		c = _grey(c, sky_night_extra_greying * night_w)
+		sky_mat.set_shader_parameter(param, c)
+
+
+## Pulls a colour toward grey of the same brightness, so it keeps its warmth but loses some punch.
+func _mute(c: Color) -> Color:
+	var g := c.get_luminance()
+	return c.lerp(Color(g, g, g), clampf(color_muting, 0.0, 1.0))
+
+
+## Pulls a colour toward grey by `amount` (0..1), keeping its brightness.
+func _grey(c: Color, amount: float) -> Color:
+	var g := c.get_luminance()
+	return c.lerp(Color(g, g, g), clampf(amount, 0.0, 1.0))
+
+
+func _make_default_ramps() -> void:
+	if sun_color_ramp == null:
+		sun_color_ramp = Gradient.new()
+		sun_color_ramp.offsets = PackedFloat32Array([0.0, 0.15, 0.35, 0.6, 1.0])
+		sun_color_ramp.colors = PackedColorArray([
+			Color(0.3, 0.25, 0.4),     # twilight: cold bruised purple-grey
+			Color(0.75, 0.22, 0.14),   # sun on the horizon: dried-blood red
+			Color(0.8, 0.45, 0.28),    # low sun: burnt amber
+			Color(0.85, 0.68, 0.48),   # dull gaslight gold
+			Color(0.88, 0.82, 0.72)])  # high sun: pale sepia
+	if ambient_color_ramp == null:
+		ambient_color_ramp = Gradient.new()
+		ambient_color_ramp.offsets = PackedFloat32Array([0.0, 0.3, 1.0])
+		ambient_color_ramp.colors = PackedColorArray([
+			Color(0.14, 0.15, 0.28),   # twilight: cold deep blue
+			Color(0.38, 0.28, 0.34),   # dusk: bruised mauve
+			Color(0.42, 0.42, 0.47)])  # day-ish: murky slate
+
+
+# =====================================================================================================
+# 👁 NIGHT VISION
+# =====================================================================================================
+
+## A soft, shadowless pale light that follows the camera, so the player can see a little way in the dark.
+func _setup_night_vision() -> void:
+	_nv_light = OmniLight3D.new()
+	_nv_light.name = "NightVisionLight"
+	_nv_light.top_level = true             # positioned in the world, not relative to this node
+	_nv_light.shadow_enabled = false
+	_nv_light.light_specular = 0.0
+	_nv_light.light_energy = 0.0
+	_nv_light.omni_range = night_vision_light_range
+	_nv_light.omni_attenuation = 1.2
+	_nv_light.light_color = night_vision_color
+	_nv_light.visible = false
+	add_child(_nv_light)
+
+
+## Every frame, after the dusk grade: at night, lift the shadow fill and exposure a little and glow a soft light
+## around the player. Fades in and out with the sunset and sunrise, and does nothing in daylight.
+func _update_night_vision(to_sun: Vector3) -> void:
+	if _nv_light == null:
+		return
+	var night := (1.0 - smoothstep(-0.15, 0.08, to_sun.y))
+	var k := night * night_vision_strength if (night_vision_enabled and _nv_on) else 0.0
+
+	if world_env and world_env.environment:
+		var env := world_env.environment
+		if _nv_base_exposure < 0.0:
+			_nv_base_exposure = env.tonemap_exposure
+		env.ambient_light_energy += night_vision_ambient_boost * k
+		env.tonemap_exposure = _nv_base_exposure + night_vision_exposure_boost * k
+
+	_nv_light.omni_range = night_vision_light_range
+	_nv_light.light_color = night_vision_color
+	_nv_light.light_energy = night_vision_light_energy * k
+	_nv_light.visible = _nv_light.light_energy > 0.005
+	var cam := get_viewport().get_camera_3d()
+	if cam:
+		_nv_light.global_position = cam.global_position

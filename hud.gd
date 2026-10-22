@@ -8,14 +8,18 @@ extends Control
 ## ├── HealthGauge (TextureProgressBar)  -- red zone
 ## └── Outline (TextureRect)             -- black linework, always full
 ##
-## What's new:
-##  - Bars glide toward the real value instead of snapping (and step is forced
-##    to 0, because TextureProgressBar defaults to step = 1, which made a
-##    10-point stamina bar move in 10 chunky jumps).
+## What it does:
+##  - Bars glide toward the real value instead of snapping (step is forced to 0).
 ##  - Health and shield flash when they take a hit.
 ##  - Health and stamina pulse when low.
+##  - Bloodborne colour grade on the three gauges, built in (no separate shader file or path needed).
 
 @export var player_path: NodePath
+
+@export_group("Bloodborne look")
+@export var bloodborne_look := true                          # untick to go back to your original HUD colours
+@export_range(0.5, 2.0) var bloodborne_brightness := 1.25    # raise if the HUD looks too dark
+@export_range(0.0, 1.0) var bloodborne_strength := 1.0       # 0 = original colours, 1 = fully Bloodborne
 
 @export_group("Smoothing")
 @export var fall_smoothing := 7.0     # how fast a bar drains toward a lower value
@@ -29,6 +33,61 @@ extends Control
 @export var low_health_threshold := 0.3      # fraction of max where health pulses
 @export var low_stamina_threshold := 0.2     # fraction of max where stamina pulses
 @export var pulse_speed := 8.0
+
+# The colour grade. It shifts colours by HUE (red, green, teal), so the bright and dim layers both change and keep their
+# own brightness. Greys and the black outline are left alone. Edit the three to_ colours to taste (r, g, b from 0 to 1).
+const BLOODBORNE_SHADER := """
+shader_type canvas_item;
+
+uniform vec3 to_red   : source_color = vec3(0.50, 0.07, 0.07);   // blood crimson
+uniform vec3 to_green : source_color = vec3(0.20, 0.36, 0.22);   // greyed moss
+uniform vec3 to_teal  : source_color = vec3(0.24, 0.48, 0.54);   // cold steel teal
+uniform float brightness = 1.25;
+uniform float strength = 1.0;
+
+varying vec4 mod_color;   // the node's modulate (hit flash / low pulse), carried through
+
+vec3 rgb2hsv(vec3 c) {
+	vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+	vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+	vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+	float d = q.x - min(q.w, q.y);
+	float e = 1.0e-10;
+	return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+vec3 recolor(vec3 target, float v) {
+	float m = max(max(target.r, target.g), max(target.b, 0.0001));
+	return target / m * min(v * brightness, 1.0);
+}
+
+void vertex() {
+	mod_color = COLOR;
+}
+
+void fragment() {
+	vec4 tex = texture(TEXTURE, UV);
+	vec3 c = tex.rgb;
+	vec3 hsv = rgb2hsv(c);
+	float h = hsv.x;
+	float s = hsv.y;
+	float v = hsv.z;
+
+	float red_dist = min(h, 1.0 - h);
+	float w_red = 1.0 - smoothstep(0.05, 0.11, red_dist);
+	float w_green = 1.0 - smoothstep(0.05, 0.10, abs(h - 0.37));
+	float w_teal = 1.0 - smoothstep(0.04, 0.09, abs(h - 0.50));
+	float total = w_red + w_green + w_teal;
+
+	float coloured = smoothstep(0.12, 0.3, s) * smoothstep(0.02, 0.08, v);
+	vec3 result = c;
+	if (total > 0.001) {
+		vec3 tinted = (w_red * recolor(to_red, v) + w_green * recolor(to_green, v) + w_teal * recolor(to_teal, v)) / total;
+		result = mix(c, tinted, min(total, 1.0) * coloured * strength);
+	}
+	COLOR = vec4(result * mod_color.rgb, tex.a * mod_color.a);
+}
+"""
 
 var player: CharacterBody3D
 
@@ -54,6 +113,8 @@ func _ready() -> void:
 			g.fill_mode = TextureProgressBar.FILL_BOTTOM_TO_TOP
 			_fill_range[g] = _compute_fill_range(g)
 
+	_apply_bloodborne_look()
+
 	if player_path != NodePath():
 		player = get_node(player_path)
 	else:
@@ -63,6 +124,24 @@ func _ready() -> void:
 
 	if player == null:
 		push_warning("HUD: couldn't find a node in the 'player' group. Make sure your Player node is in that group, or set Player Path manually.")
+
+
+## Puts the Bloodborne colour shader on the three gauges. The black outline is left alone.
+func _apply_bloodborne_look() -> void:
+	if not bloodborne_look:
+		return
+	var sh := Shader.new()
+	sh.code = BLOODBORNE_SHADER
+	var count := 0
+	for g in [health_gauge, shield_gauge, stamina_gauge]:
+		if g:
+			var mat := ShaderMaterial.new()
+			mat.shader = sh
+			mat.set_shader_parameter("brightness", bloodborne_brightness)
+			mat.set_shader_parameter("strength", bloodborne_strength)
+			g.material = mat
+			count += 1
+	print("HUD: Bloodborne look applied to %d gauges" % count)
 
 
 func _process(delta: float) -> void:

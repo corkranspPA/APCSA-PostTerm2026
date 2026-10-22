@@ -152,10 +152,12 @@ var _roll_cam_offset := Vector3.ZERO           # camera shift currently applied 
 # little in the roll direction, then ease back down to the speed you came in with.
 @export var air_roll_speed_boost := 0.3        # peak extra speed as a fraction of your entry speed (0.3 = +30%)
 @export var air_roll_min_speed := 7.0          # entry speed used if you were slower than this (e.g. a standing jump)
-@export var air_roll_gravity_mult := 0.8       # slightly floatier while rolling in the air (arc feels smoother, easier to finish)
+@export var air_roll_gravity_mult := 0.12      # gravity during an air roll (0 = none). Low = a flat, level air dash instead of a diagonal drop
+@export var air_roll_hold_height := true       # true = the fall (or rise) is cancelled the moment an air roll starts, so you dash level
 @export var air_roll_fov_kick := 5.0           # FOV widens by this much at the peak of the surge, then settles
 @export var air_roll_vignette_boost := 0.15    # light vignette so the screen edges don't swim
 # If you land before the air roll is this far along (0..1), you botch it and tumble. Set to 0 to disable.
+# (A hop too short to finish the roll never botches: the roll just ends when you land.)
 @export var air_roll_complete_progress := 0.7
 
 # -------------------------
@@ -192,6 +194,7 @@ var roll_buffer_timer := 0.0
 var is_dashing := false
 var is_rolling := false                     # true while a crouched dash (roll) is happening
 var roll_is_air := false                    # NEW: this roll was started in mid-air
+var roll_can_botch := true                  # NEW: false when the hop was too short to finish an air roll (so landing early is fine)
 var roll_progress := 0.0                    # 0..1 through the current roll (drives the camera spin)
 var roll_current_speed := 0.0               # speed of the current roll (never slower than the speed you started it at)
 var dash_timer := 0.0
@@ -855,10 +858,14 @@ func _physics_process(delta: float) -> void:
 
 	move_and_slide()
 
-	# NEW: landed before finishing an air roll = you botch it and tumble.
+	# NEW: landed before finishing an air roll. If there was enough airtime to finish it, you botch it and tumble.
+	# If the hop was too short to ever finish it, the roll simply ends on landing and you keep your speed.
 	if is_dashing and is_rolling and roll_is_air and is_on_floor() \
 	and roll_progress < air_roll_complete_progress:
-		_start_knockdown()
+		if roll_can_botch:
+			_start_knockdown()
+		else:
+			_end_dash()
 
 	if is_slamming and is_on_floor():
 		_slam_impact()
@@ -1248,6 +1255,11 @@ func start_dash(force_roll := false, tap_dir := Vector2.ZERO):
 
 	is_rolling = rolling
 	roll_is_air = rolling and not is_on_floor()   # NEW: air rolls get the gentler camera + the "must finish it" rule
+	# NEW: only count an early landing as a botched roll if the hop had enough airtime to finish it.
+	# NEW: an air dash goes out level: cancel the fall/rise at the start so you don't glide diagonally into the ground.
+	if roll_is_air and air_roll_hold_height:
+		velocity.y = 0.0
+	roll_can_botch = roll_is_air and _air_time_estimate() >= roll_duration * air_roll_complete_progress
 	roll_progress = 0.0
 	# Never roll slower than the speed you were already carrying (keeps momentum).
 	roll_current_speed = maxf(air_roll_min_speed if roll_is_air else roll_speed, Vector2(velocity.x, velocity.z).length())
@@ -1278,6 +1290,32 @@ func start_dash(force_roll := false, tap_dir := Vector2.ZERO):
 		dir = -transform.basis.z
 
 	dash_direction = dir.normalized()
+
+
+## NEW: rough time (seconds) until you land, using the same gravity an air roll uses (rise, then the heavier fall).
+func _air_time_estimate() -> float:
+	var shape := collision.shape as CapsuleShape3D
+	if shape == null:
+		return 99.0
+	var feet_y := global_position.y + collision.position.y - shape.height * 0.5
+	var from := Vector3(global_position.x, feet_y + 0.1, global_position.z)
+	var q := PhysicsRayQueryParameters3D.create(from, from + Vector3.DOWN * 60.0)
+	q.exclude = [get_rid()]
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return 99.0
+	var d := maxf(feet_y - hit.position.y, 0.0)
+	var g := maxf(get_gravity().length(), 0.01) * air_roll_gravity_mult
+	var gf := g * fall_gravity_mult
+	var vy := velocity.y
+	var t := 0.0
+	var h := d
+	if vy > 0.0:
+		t = vy / g
+		h += vy * vy / (2.0 * g)
+		vy = 0.0
+	var down := -vy
+	return t + (-down + sqrt(down * down + 2.0 * gf * h)) / gf
 
 
 func _end_dash() -> void:
