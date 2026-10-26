@@ -15,6 +15,8 @@
 [ext_resource type="Script" uid="uid://bo6n1i5qobckv" path="res://hud.gd" id="11_efxa6"]
 [ext_resource type="Script" uid="uid://be0h48u624ji8" path="res://ground.gd" id="14_vivmo"]
 [ext_resource type="Script" uid="uid://db06uymfyne32" path="res://natural_lighting.gd" id="14_w48qg"]
+[ext_resource type="Script" uid="uid://cdbe5vb1mpobr" path="res://enemy_spawner.gd" id="16_2cqfq"]
+[ext_resource type="Script" uid="uid://cqtsb3x25uwr8" path="res://sakura_trees.gd" id="17_yaehf"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
 
@@ -184,11 +186,17 @@ offset_bottom = 1.0
 [node name="HUD" parent="." unique_id=652414977 instance=ExtResource("6_4c57u")]
 script = ExtResource("11_efxa6")
 
-[node name="Node" type="Node" parent="." unique_id=1451125049]
+[node name="unsure but dont delete" type="Node" parent="." unique_id=1451125049]
 
 [node name="natural_lighting" type="Node" parent="." unique_id=1817627444]
 script = ExtResource("14_w48qg")
 
-[node name="Node3D" type="Node3D" parent="." unique_id=1637826285]
+[node name="ground" type="Node3D" parent="." unique_id=1637826285]
 script = ExtResource("14_vivmo")
 grass_texture = ExtResource("8_ycdy4")
+
+[node name="enemy spawner" type="Node3D" parent="." unique_id=1234266323]
+script = ExtResource("16_2cqfq")
+
+[node name="sakura trees" type="Node3D" parent="." unique_id=1408846149]
+script = ExtResource("17_yaehf")

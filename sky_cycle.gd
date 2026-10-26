@@ -133,6 +133,7 @@ extends Node3D
 @export var shadow_normal_bias := 1.5
 @export var penumbra_low_sun := 2.2                         # soft shadow edge (degrees) with the sun on the horizon
 @export var penumbra_high_sun := 1.0
+@export_range(0.0, 0.5) var shadow_on_threshold := 0.08     # NEW: a sun/moon only casts shadows once it is at least this "up" (0..1), so both never draw shadows at once at dusk/dawn
 
 @export_group("Dusk: colour / contact shadows / glow")
 @export var exposure := 0.9
@@ -409,13 +410,15 @@ func _make_sprite(tex: Texture2D, size_degrees: float) -> Sprite3D:
 	return s
 
 
+## NEW: dim lights stay visible for the whole game and only their energy changes. Switching a light's visibility
+## on and off changes how many lights the renderer has to handle, which caused a hitch at every sunrise and sunset.
 func _make_dim_light(color: Color) -> DirectionalLight3D:
 	var l := DirectionalLight3D.new()
 	l.light_color = color
 	l.light_energy = 0.0
 	l.shadow_enabled = false
 	l.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
-	l.visible = false
+	l.visible = true
 	add_child(l)
 	return l
 
@@ -458,17 +461,23 @@ func update_sun_and_moon() -> void:
 	var moon_alpha := smoothstep(-0.08, 0.05, -height)
 
 	# ---------------- MAIN LIGHTS ----------------
+	# NEW: the lights are never hidden (that caused a hitch at every sunrise / sunset). Instead the energy fades to 0,
+	# and shadows are only drawn while the light is actually up, so the sun and moon never both draw shadows at once.
 	if sun:
 		_aim_light(sun, -to_sun, side)
 		sun.light_energy = sun_energy * sun_amount
 		sun.light_color = sunset_color.lerp(Color.WHITE, smoothstep(0.0, 0.5, height))
-		sun.visible = sun.light_energy > 0.01             # no light (and no shadow cost) while it's below the horizon
+		var sun_shadow := sun_amount > shadow_on_threshold
+		if sun.shadow_enabled != sun_shadow:
+			sun.shadow_enabled = sun_shadow
 
 	if moon:
 		_aim_light(moon, -to_moon, side)
 		moon.light_energy = moon_energy * moon_amount
 		moon.light_color = moon_light_color
-		moon.visible = moon.light_energy > 0.01
+		var moon_shadow := moon_amount > shadow_on_threshold
+		if moon.shadow_enabled != moon_shadow:
+			moon.shadow_enabled = moon_shadow
 
 	# ---------------- SKY / WORLD ----------------
 	update_night_darkness(height)
@@ -564,29 +573,27 @@ func update_dim_lights(to_sun: Vector3, to_moon: Vector3, side: Vector3, sun_amo
 	if sun_aura_light == null or moon_aura_light == null or star_light == null:
 		return
 
+	# NEW: these lights are never hidden, only faded to 0 energy (hiding them caused a hitch at sunrise / sunset).
 	if not dim_lights_enabled:
-		sun_aura_light.visible = false
-		moon_aura_light.visible = false
-		star_light.visible = false
+		sun_aura_light.light_energy = 0.0
+		moon_aura_light.light_energy = 0.0
+		star_light.light_energy = 0.0
 		return
 
 	# Glow lights come from the same direction as their sun / moon, in the glow's colour.
 	_aim_light(sun_aura_light, -to_sun, side)
 	sun_aura_light.light_color = sun_aura_color
 	sun_aura_light.light_energy = aura_light_energy * sun_amount
-	sun_aura_light.visible = sun_aura_light.light_energy > 0.005
 
 	_aim_light(moon_aura_light, -to_moon, side)
 	moon_aura_light.light_color = moon_aura_color
 	moon_aura_light.light_energy = aura_light_energy * moon_amount
-	moon_aura_light.visible = moon_aura_light.light_energy > 0.005
 
 	# Starlight: a faint cool fill from above that fades in at night and shimmers slightly.
 	_aim_light(star_light, Vector3(0.15, -1.0, 0.1).normalized(), Vector3.FORWARD)
 	var shimmer := 0.9 + 0.1 * sin(Time.get_ticks_msec() * 0.0017)
 	star_light.light_color = star_light_color
 	star_light.light_energy = star_light_energy * moon_amount * shimmer
-	star_light.visible = star_light.light_energy > 0.005
 
 
 # -------------------------
@@ -634,6 +641,10 @@ func _setup_dusk() -> void:
 	_apply_dusk_environment()
 	_apply_shadows(sun)
 	_apply_shadows(moon)
+	# NEW: the moon gets cheaper shadows (2 splits, no soft-shadow search), which helps while both lights overlap at dusk/dawn.
+	if moon:
+		moon.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+		moon.light_angular_distance = 0.0
 	_sky_fill = _make_fill("SkyFill", -90.0)    # shines down
 	_bounce = _make_fill("GroundBounce", 90.0)  # shines up
 
@@ -812,6 +823,7 @@ func _make_default_ramps() -> void:
 # =====================================================================================================
 
 ## A soft, shadowless pale light that follows the camera, so the player can see a little way in the dark.
+## NEW: it stays visible all the time and only its energy changes (no hitch when it fades in at sunset).
 func _setup_night_vision() -> void:
 	_nv_light = OmniLight3D.new()
 	_nv_light.name = "NightVisionLight"
@@ -822,7 +834,7 @@ func _setup_night_vision() -> void:
 	_nv_light.omni_range = night_vision_light_range
 	_nv_light.omni_attenuation = 1.2
 	_nv_light.light_color = night_vision_color
-	_nv_light.visible = false
+	_nv_light.visible = true
 	add_child(_nv_light)
 
 
@@ -844,7 +856,6 @@ func _update_night_vision(to_sun: Vector3) -> void:
 	_nv_light.omni_range = night_vision_light_range
 	_nv_light.light_color = night_vision_color
 	_nv_light.light_energy = night_vision_light_energy * k
-	_nv_light.visible = _nv_light.light_energy > 0.005
 	var cam := get_viewport().get_camera_3d()
 	if cam:
 		_nv_light.global_position = cam.global_position

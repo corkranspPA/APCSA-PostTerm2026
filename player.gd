@@ -39,8 +39,8 @@ var sprint_ramp := 0.0  # 0..1, how "spooled up" the current sprint is
 # -------------------------
 @export var max_stamina := 15.0          # raised from 10 (with dash_stamina_cost 3 that's 5 dashes)
 @export var stamina_drain_rate := 1.0        # stamina lost per second while actively sprinting
-@export var stamina_regen_rate := 1.6        # stamina gained per second once recovering
-@export var stamina_regen_delay := 0.8       # seconds after you stop sprinting before regen kicks in
+@export var stamina_regen_rate := 4.0        # CHANGED (was 1.6): stamina gained per second once recovering
+@export var stamina_regen_delay := 0.5       # CHANGED (was 0.8): seconds after you stop sprinting before regen kicks in
 @export var min_stamina_to_sprint := 0.5     # can't START a new sprint below this
 @export var low_stamina_speed_mult := 0.55   # sprint speed multiplier once fully gassed
 @export var stamina_taper_ratio := 0.3       # below this fraction of max stamina, speed starts tapering
@@ -649,6 +649,11 @@ func _physics_process(delta: float) -> void:
 			if stamina != prev_stamina:
 				stats_changed.emit()
 	was_wall_contact = wall_contact
+
+	# NEW: out of stamina = you stop running. A slide in progress is NOT touched, so it carries on until its momentum
+	# dies or you end it yourself. Any extra speed fades slowly on its own (ground_overspeed_decel).
+	if is_sprinting and stamina <= 0.0:
+		is_sprinting = false
 
 	if is_dashing:
 		dash_timer -= delta
@@ -1505,7 +1510,9 @@ func stop_slide():
 
 	if can_stand_up():
 		is_crouching = false
-		is_sprinting = true
+		# CHANGED: only go back to sprinting if there's stamina for it (so a slide that ends while you're gassed
+		# doesn't put you straight back into a sprint that would be cut off again).
+		is_sprinting = stamina > min_stamina_to_sprint
 
 
 func can_stand_up() -> bool:
