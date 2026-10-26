@@ -13,6 +13,7 @@
 [ext_resource type="Texture2D" uid="uid://bhevcdqpvbber" path="res://grass_seamless.png" id="8_ycdy4"]
 [ext_resource type="Texture2D" uid="uid://c3bevnjgxd0af" path="res://stone.png" id="9_ycdy4"]
 [ext_resource type="Script" uid="uid://bo6n1i5qobckv" path="res://hud.gd" id="11_efxa6"]
+[ext_resource type="Script" uid="uid://be0h48u624ji8" path="res://ground.gd" id="14_vivmo"]
 [ext_resource type="Script" uid="uid://db06uymfyne32" path="res://natural_lighting.gd" id="14_w48qg"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
@@ -43,19 +44,6 @@ shader_parameter/squint_tint_color = Color(0.35, 0.05, 0.04, 1)
 
 [sub_resource type="NavigationMesh" id="NavigationMesh_7mycd"]
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_w48qg"]
-albedo_texture = ExtResource("8_ycdy4")
-uv1_scale = Vector3(0.25, 0.25, 0.25)
-uv1_triplanar = true
-uv1_world_triplanar = true
-
-[sub_resource type="BoxMesh" id="BoxMesh_5vw27"]
-material = SubResource("StandardMaterial3D_w48qg")
-size = Vector3(115, 1, 115)
-
-[sub_resource type="BoxShape3D" id="BoxShape3D_kek77"]
-size = Vector3(115, 1, 115)
-
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_vivmo"]
 albedo_texture = ExtResource("9_ycdy4")
 uv1_scale = Vector3(0.25, 0.25, 0.25)
@@ -77,10 +65,12 @@ sun_texture = ExtResource("2_w48qg")
 moon_texture = ExtResource("3_vivmo")
 
 [node name="sun" type="DirectionalLight3D" parent="." unique_id=1230024567]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 0)
 light_energy = 2.0
 shadow_enabled = true
 
 [node name="moon" type="DirectionalLight3D" parent="." unique_id=1546154781]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 0)
 light_color = Color(0.8909941, 0.99999994, 0.9981051, 1)
 light_energy = 0.8
 
@@ -92,12 +82,14 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6570234, 0)
 script = ExtResource("1_ig7tw")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=1497100508]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 0)
 shape = SubResource("CapsuleShape3D_0xm2m")
 
 [node name="Head" type="Node3D" parent="Player" unique_id=2116032823]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 
 [node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=1413065017]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 0)
 current = true
 
 [node name="weapon" type="Node3D" parent="Player/Head/Camera3D" unique_id=224750740]
@@ -131,14 +123,6 @@ mouse_filter = 2
 [node name="NavigationRegion3D" type="NavigationRegion3D" parent="." unique_id=193481439 groups=["player", "source geometry"]]
 navigation_mesh = SubResource("NavigationMesh_7mycd")
 
-[node name="ground" type="StaticBody3D" parent="." unique_id=2119874086]
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="ground" unique_id=1208371057]
-mesh = SubResource("BoxMesh_5vw27")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="ground" unique_id=1422201163]
-shape = SubResource("BoxShape3D_kek77")
-
 [node name="wall" type="StaticBody3D" parent="." unique_id=2131724013]
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="wall" unique_id=1041174456]
@@ -150,7 +134,7 @@ transform = Transform3D(115.83347, 0, 0, 0, -0.12687176, -9.996779, 0, 4.9983897
 shape = SubResource("BoxShape3D_5vw27")
 
 [node name="enemy" parent="." unique_id=1990476701 instance=ExtResource("7_272bh")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8.917671, 0.5, -10.791424)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8.917671, 4.5, -10.791424)
 
 [node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=1565754248]
 
@@ -204,3 +188,7 @@ script = ExtResource("11_efxa6")
 
 [node name="natural_lighting" type="Node" parent="." unique_id=1817627444]
 script = ExtResource("14_w48qg")
+
+[node name="Node3D" type="Node3D" parent="." unique_id=1637826285]
+script = ExtResource("14_vivmo")
+grass_texture = ExtResource("8_ycdy4")
