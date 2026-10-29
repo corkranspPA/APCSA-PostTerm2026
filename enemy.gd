@@ -28,8 +28,13 @@ var face_original_material: Material = null
 @export var crouch_sound_radius := 1.5
 @export var gravity := 9.8
 
+# NEW: stops enemies losing you the moment you sprint past them.
+@export var close_sense_radius := 3.5   # inside this distance it notices you even from behind (still needs a clear line)
+@export var lose_sight_grace := 1.5     # seconds it keeps coming after you lose sight, before giving up
+var lost_sight_timer := 0.0
+
 # =========================
-# LOOK TOWARD A SHOT (NEW)
+# LOOK TOWARD A SHOT
 # =========================
 # When shot and it can't already see you, the enemy turns to face where the shot came from and looks around.
 # If you're in its sight (range, angle and clear line) it goes after you. If not, it just keeps looking, then settles down.
@@ -43,14 +48,14 @@ var look_target := Vector3.ZERO           # world position of whoever shot it
 # =========================
 # ATTACK (telegraphed lunge)
 # =========================
-@export var attack_range := 2.6          # starts an attack when the player is this close (flat distance)
-@export var attack_windup := 0.55        # telegraph time — enemy turns orange and stops. Dodge window!
+@export var attack_range := 3.2          # CHANGED (was 2.6): starts an attack when the player is this close (flat distance)
+@export var attack_windup := 0.4         # CHANGED (was 0.55): telegraph time — enemy turns orange and stops. Dodge window!
 @export var attack_lunge_speed := 16.0   # how fast the lunge is
-@export var attack_lunge_time := 0.2     # how long the lunge lasts
-@export var attack_recover := 0.6        # vulnerable recovery after the lunge
-@export var attack_cooldown := 1.2       # extra wait before it can attack again
+@export var attack_lunge_time := 0.25    # CHANGED (was 0.2): how long the lunge lasts
+@export var attack_recover := 0.45       # CHANGED (was 0.6): vulnerable recovery after the lunge
+@export var attack_cooldown := 0.6       # CHANGED (was 1.2): extra wait before it can attack again
 @export var attack_damage := 20.0
-@export var attack_hit_radius := 1.8     # how close the player must be during the lunge to get hit
+@export var attack_hit_radius := 2.2     # CHANGED (was 1.8): how close the player must be during the lunge to get hit
 @export var attack_knockback := 9.0
 
 enum AttackPhase { NONE, WINDUP, LUNGE, RECOVER }
@@ -150,7 +155,7 @@ var spawn_rotation: Vector3 = Vector3.ZERO
 # =========================
 # STATE
 # =========================
-enum State { IDLE, ALERT, CHASING, ATTACKING, LOOKING }   # LOOKING = NEW: turned toward a shot, scanning for you
+enum State { IDLE, ALERT, CHASING, ATTACKING, LOOKING }   # LOOKING = turned toward a shot, scanning for you
 var state: State = State.IDLE
 var player: Node3D = null
 var last_known_position: Vector3 = Vector3.ZERO
@@ -218,17 +223,23 @@ func _physics_process(delta: float) -> void:
 				state = State.IDLE
 		State.CHASING:
 			if can_see_player:
+				lost_sight_timer = lose_sight_grace
 				last_known_position = player.global_position
 				if _flat_distance_to_player() <= attack_range and attack_cooldown_timer <= 0.0 and player.get("is_dead") != true:
 					_start_attack()
 				else:
 					_move_toward(player.global_position)
 			else:
-				state = State.ALERT
+				# CHANGED: keep coming for a moment after losing sight instead of giving up straight away.
+				lost_sight_timer -= delta
+				if lost_sight_timer > 0.0:
+					_move_toward(last_known_position)
+				else:
+					state = State.ALERT
 		State.ATTACKING:
 			_process_attack(delta)
 		State.LOOKING:
-			# NEW: stand still, turn toward the shot and watch. Seeing you (in _check_detection) flips this to CHASING.
+			# Stand still, turn toward the shot and watch. Seeing you (in _check_detection) flips this to CHASING.
 			velocity.x = move_toward(velocity.x, 0.0, move_accel * 2.0 * delta)
 			velocity.z = move_toward(velocity.z, 0.0, move_accel * 2.0 * delta)
 			_face_position(look_target, hit_look_turn_speed, delta)
@@ -249,15 +260,21 @@ func _physics_process(delta: float) -> void:
 # DETECTION
 # =========================
 func _check_detection() -> void:
-	can_see_player = _has_line_of_sight()
+	# NEW: right after the player pops out of the ground (burrow) they're hidden for a moment: no sight, no hearing.
+	var stealth = player.get("stealth_timer")
+	var hidden: bool = stealth != null and stealth > 0.0
+	can_see_player = false if hidden else _has_line_of_sight()
 	# Once committed to an attack, don't let detection interrupt it.
 	if state == State.ATTACKING:
 		return
 	if can_see_player:
 		state = State.CHASING
+		lost_sight_timer = lose_sight_grace
 		last_known_position = player.global_position
 		return
-	# NEW: while looking toward a shot, only actually SEEING you makes it come after you (no sound detection).
+	if hidden:
+		return
+	# While looking toward a shot, only actually SEEING you makes it come after you (no sound detection).
 	if state == State.LOOKING or deaf_timer > 0.0:
 		return
 	var dist = global_position.distance_to(player.global_position)
@@ -272,6 +289,9 @@ func _has_line_of_sight() -> bool:
 	var dist = global_position.distance_to(player.global_position)
 	if dist > sight_range:
 		return false
+	# NEW: right next to it, it notices you from any angle (as long as nothing solid is in the way).
+	if dist <= close_sense_radius:
+		return _raycast_clear(player.global_position)
 	var dir_to_player = (player.global_position - global_position).normalized()
 	var forward = -global_transform.basis.z
 	var angle = rad_to_deg(forward.angle_to(dir_to_player))
@@ -281,17 +301,39 @@ func _has_line_of_sight() -> bool:
 
 func _raycast_clear(target: Vector3) -> bool:
 	var space = get_world_3d().direct_space_state
-	var query = PhysicsRayQueryParameters3D.create(
-		global_position + Vector3.UP * 0.5,
-		target + Vector3.UP * 0.5
-	)
-	query.exclude = [self]
-	query.collision_mask = 0xFFFFFFFF & ~(1 << (FACEBOX_LAYER - 1))
-	var result = space.intersect_ray(query)
-	if result.is_empty():
-		return true
-	if result.collider == player:
-		return true
+	# From the enemy's eyes to the player's chest, not from near the ground, so bumps in the terrain don't block the view.
+	var from := global_position + Vector3.UP * 1.2
+	var to := target + Vector3.UP * 1.0
+	var mask := 0xFFFFFFFF & ~(1 << (FACEBOX_LAYER - 1))
+	var exclude: Array[RID] = [get_rid()]
+	# The ground is skipped (the ray carries on past it), so only trees, rocks, walls and other props block sight.
+	for i in 4:
+		var query := PhysicsRayQueryParameters3D.create(from, to)
+		query.exclude = exclude
+		query.collision_mask = mask
+		var result = space.intersect_ray(query)
+		if result.is_empty():
+			return true
+		if result.collider == player:
+			return true
+		if (result.position as Vector3).distance_to(to) < 1.0:
+			return true                                 # it hit something right at the player (e.g. the ground under their feet)
+		if _is_terrain(result.collider):
+			exclude.append(result.rid)
+			continue
+		return false
+	return true
+
+
+## True if this physics body belongs to the terrain (a chunk of ground_chunks.gd).
+func _is_terrain(col: Object) -> bool:
+	var n := col as Node
+	for i in 4:
+		if n == null:
+			return false
+		if n.has_method("height_at"):
+			return true
+		n = n.get_parent()
 	return false
 
 # =========================
@@ -370,7 +412,7 @@ func _process_attack(delta: float) -> void:
 
 func _player_in_hit_range() -> bool:
 	var d = player.global_position - global_position
-	if absf(d.y) > 1.8:
+	if absf(d.y) > 2.5:   # CHANGED (was 1.8): slopes and hops no longer make the lunge whiff
 		return false
 	d.y = 0
 	return d.length() <= attack_hit_radius
@@ -395,6 +437,7 @@ func _deal_attack_damage() -> void:
 func _end_attack() -> void:
 	attack_phase = AttackPhase.NONE
 	attack_cooldown_timer = attack_cooldown
+	lost_sight_timer = lose_sight_grace   # NEW: it keeps chasing for a moment even if you slipped behind it
 	state = State.CHASING
 	if not is_flashing:
 		_apply_base_materials()
@@ -497,12 +540,12 @@ func take_damage(amount: float, hit_point: Vector3, shooter: Node) -> void:
 		away.y = 0.0
 		if away.length() > 0.05:
 			last_hit_dir = away.normalized()
-		# NEW: turn toward whoever shot us (unless we're mid-attack or already chasing something we can see).
+		# Turn toward whoever shot us (unless we're mid-attack or already chasing something we can see).
 		if state != State.ATTACKING and not (state == State.CHASING and can_see_player):
 			look_target = (shooter as Node3D).global_position
 			look_timer = hit_look_time
 			state = State.LOOKING
-			# NEW: shot from behind (outside its view cone) = it can't "hear" you into chasing; it must turn and see you.
+			# Shot from behind (outside its view cone) = it can't "hear" you into chasing; it must turn and see you.
 			var to_shooter := look_target - global_position
 			to_shooter.y = 0.0
 			if to_shooter.length() > 0.05:
@@ -863,6 +906,7 @@ func _respawn() -> void:
 	last_hit_dir = Vector3.ZERO
 	look_timer = 0.0
 	deaf_timer = 0.0
+	lost_sight_timer = 0.0
 
 	is_dead = false
 	is_fading = false

@@ -5,7 +5,7 @@ extends Node3D
 ##  1. Put sakura_lod.glb, sakura_bark.jpg and sakura_blossom.png in your project (res://), next to Enemy.tscn.
 ##  2. Add a Node3D anywhere in your main scene (e.g. next to the terrain), at the world origin, and attach this script.
 ##     It finds the terrain (the node with ground_chunks.gd) and the player by itself.
-##  3. Use the new enemy_spawner.gd: it finds this node and never spawns enemies inside trees.
+##  3. Use enemy_spawner.gd: it finds this node and never spawns enemies inside trees.
 ##
 ## HOW IT STAYS FAST
 ##  - The tree is NOT your original model (that one has about 400,000 triangles). sakura_lod.glb holds three cut-down
@@ -32,28 +32,32 @@ extends Node3D
 # HOW MANY AND WHERE
 # -------------------------
 @export_group("Forest")
-@export var spacing := 8.0                             # metres between possible tree spots (smaller = more trees, but costs more)
-@export var grid_per_cell := 4                         # tree spots per cell side (cell size = spacing x this = 32 m)
-@export_range(0.0, 0.9) var jitter := 0.6              # how far each tree can wander from its spot (0.6 keeps them at least 3 m apart)
-@export var forest_wavelength := 260.0                 # size of the groves and clearings (metres)
-@export_range(-1.0, 1.0) var forest_low := -0.15       # noise value where the grove edge begins
-@export_range(-1.0, 1.0) var forest_high := 0.35       # noise value where the grove is fully dense
-@export_range(0.0, 1.0) var max_density := 0.75        # chance a tree spot holds a tree inside a grove (raise for a thicker forest)
-@export_range(0.0, 1.0) var min_density := 0.04        # chance in clearings (lone trees)
+@export var spacing := 10.0                            # metres between possible tree spots (smaller = more trees, but costs more)
+@export var grid_per_cell := 4                         # tree spots per cell side (cell size = spacing x this = 40 m)
+@export_range(0.0, 0.9) var jitter := 0.5              # how far each tree can wander from its spot (0.5 keeps trunks at least 5 m apart)
+@export var forest_wavelength := 300.0                 # size of the groves and clearings (metres)
+@export_range(-1.0, 1.0) var forest_low := 0.05        # noise value where the grove edge begins
+@export_range(-1.0, 1.0) var forest_high := 0.5        # noise value where the grove is fully dense
+@export_range(0.0, 1.0) var max_density := 0.55        # chance a tree spot holds a tree inside a grove (raise for a thicker forest)
+@export_range(0.0, 1.0) var min_density := 0.05        # chance in clearings (lone trees)
 @export var scale_min := 0.75
 @export var scale_max := 1.3
 @export var max_slope_degrees := 38.0                  # no trees on steeper ground (raised so mountain slopes get trees)
 @export var max_tree_height := 90.0                    # no trees above this height (mountain tops)
 @export var tree_line_start := 45.0                    # above this height the trees thin out, reaching none at max_tree_height
-@export var clear_origin_radius := 20.0                # no trees this close to the world centre (where you start)
+@export var clear_origin_radius := 40.0                # no trees this close to the world centre (where you start)
+@export var object_clearance := 1.0                    # trunks stay at least this far from other solid objects in your scene (metres)
+@export var canopy_clearance_radius := 3.0             # ... and the blossom crown (this wide, at scale 1) must not poke into them either
+@export var blocker_group := "no_trees"                # put any node in this group to keep trees away from it (set meta "radius", default below)
+@export var blocker_default_radius := 8.0              # metres kept clear around a node in the blocker group
 
 # -------------------------
 # DISTANCES (performance)
 # -------------------------
 @export_group("Distances")
-@export var draw_distance := 280.0                     # trees further than this are not drawn at all
-@export var lod0_distance := 55.0                      # full-detail trees up to here
-@export var lod1_distance := 160.0                     # medium-detail trees up to here, then the cheapest version
+@export var draw_distance := 220.0                     # trees further than this are not drawn at all
+@export var lod0_distance := 40.0                      # full-detail trees up to here (the costly ones, so keep this small)
+@export var lod1_distance := 130.0                     # medium-detail trees up to here, then the cheapest version
 @export var lod_overlap := 12.0                        # both levels show for this many metres when switching (hides the pop)
 @export var lod0_casts_shadows := true                 # near trees cast shadows
 @export var lod1_casts_shadows := false                # medium trees cast shadows (nicer, but costs more)
@@ -78,7 +82,7 @@ extends Node3D
 @export var bark_tint := Color(0.78, 0.72, 0.7)
 @export var bark_tile_meters := 2.0                    # how many metres one copy of the bark texture covers
 
-var cell_size := 32.0
+var cell_size := 40.0
 
 var _seed := 0
 var _n_forest: FastNoiseLite
@@ -86,7 +90,7 @@ var _logic_ready := false
 var _ready_done := false
 
 var _cells := {}                                       # Vector2i -> { "n", "xf", "scl", "p2" } (where the trees are; cheap)
-var _built := {}                                       # Vector2i -> Node3D holding the cell's MultiMeshes
+var _built := {}                                       # Vector2i -> Node3D holding the cell's MultiMeshes (null for a cell with no trees)
 var _bodies := {}                                      # Vector2i -> StaticBody3D with the trunk collision
 var _build_queue: Array[Vector2i] = []
 var _free_queue: Array[Vector2i] = []
@@ -95,6 +99,11 @@ var _lod_mask := {}                                    # Vector2i -> which level
 var _upgrade_queue: Array[Vector2i] = []               # built cells that now need a nearer level added
 var _body_keep := {}                                   # cells whose collision should exist (with a little extra, so it doesn't flicker)
 var _timer := 0.0
+var _physics_ready := false                            # true once the physics world knows about the scene's solid objects
+var _probe_trunk: CylinderShape3D
+var _probe_crown: CylinderShape3D
+var _lod_begins := PackedFloat32Array([0.0, 0.0, 0.0]) # where each detail level starts / stops being drawn (set in _refresh_lod_ranges)
+var _lod_ends := PackedFloat32Array([0.0, 0.0, 0.0])
 
 var _meshes: Array[Mesh] = []
 var _bark_mat: StandardMaterial3D
@@ -107,6 +116,8 @@ func _ready() -> void:
 	# Wait two frames so the player and the terrain exist.
 	await get_tree().process_frame
 	await get_tree().process_frame
+	await get_tree().physics_frame                      # so the solid objects in your scene can be found by the checks below
+	_physics_ready = true
 	if not _find_things():
 		return
 	if not _load_resources():
@@ -114,6 +125,7 @@ func _ready() -> void:
 	if not _ensure_logic():
 		push_error("sakura_trees: the terrain isn't ready (no seed found).")
 		return
+	_refresh_lod_ranges()
 	_ready_done = true
 	_update(_focus())
 	# Fill the area right around you at once, so you never start in an empty field; the rest streams in.
@@ -146,7 +158,7 @@ func _process(delta: float) -> void:
 	var up := 0
 	while up < 2 and _upgrade_queue.size() > 0:
 		var uk: Vector2i = _upgrade_queue.pop_back()
-		if _built.has(uk):
+		if _built.get(uk) != null:
 			var missing := _lods_needed(uk, _focus()) & ~int(_lod_mask.get(uk, 0))
 			if missing != 0:
 				_add_lods(uk, missing)
@@ -173,7 +185,7 @@ func _find_things() -> bool:
 	if player == null:
 		push_error("sakura_trees: couldn't find the player. Put the player in group 'player'.")
 		return false
-	if _find_terrain() == false:
+	if not _find_terrain():
 		push_error("sakura_trees: couldn't find the terrain node (the one with ground_chunks.gd). Drag it into Terrain.")
 		return false
 	return true
@@ -236,7 +248,7 @@ func _load_resources() -> bool:
 	return true
 
 
-## Works out the seed and noise. Can be called at any time (enemy_spawner uses is_blocked_at before the first frame).
+## Works out the seed and noise. Can be called at any time (enemy_spawner uses is_blocked_at early on).
 func _ensure_logic() -> bool:
 	if _logic_ready:
 		return true
@@ -255,6 +267,11 @@ func _ensure_logic() -> bool:
 	_n_forest.fractal_octaves = 2
 	_logic_ready = true
 	return true
+
+
+func _refresh_lod_ranges() -> void:
+	_lod_begins = PackedFloat32Array([0.0, lod0_distance - lod_overlap, lod1_distance - lod_overlap])
+	_lod_ends = PackedFloat32Array([lod0_distance, lod1_distance, draw_distance + cell_size * 1.5])
 
 
 # -------------------------
@@ -283,6 +300,16 @@ func _get_cell(key: Vector2i) -> Dictionary:
 	var p2 := PackedVector2Array()
 	var rng := RandomNumberGenerator.new()
 	var gn := maxi(grid_per_cell, 1)
+
+	# The marked blockers are looked up once per cell (not once per tree).
+	var bpos := PackedVector2Array()
+	var brad := PackedFloat32Array()
+	for b in get_tree().get_nodes_in_group(blocker_group):
+		if b is Node3D:
+			var bp := (b as Node3D).global_position
+			bpos.append(Vector2(bp.x, bp.z))
+			brad.append(float(b.get_meta("radius", blocker_default_radius)))
+
 	for gi in gn:
 		for gj in gn:
 			var ix := key.x * gn + gi
@@ -303,6 +330,13 @@ func _get_cell(key: Vector2i) -> Dictionary:
 				continue
 			if x * x + z * z < clear_origin_radius * clear_origin_radius:
 				continue
+			var near_marked := false
+			for bi in bpos.size():
+				if Vector2(bpos[bi].x - x, bpos[bi].y - z).length() < brad[bi]:
+					near_marked = true
+					break
+			if near_marked:
+				continue
 			var h: float = terrain.height_at(x, z)
 			if h > max_tree_height:
 				continue
@@ -316,21 +350,63 @@ func _get_cell(key: Vector2i) -> Dictionary:
 				continue
 
 			var s := lerpf(scale_min, scale_max, sr)
+			# Never inside (or touching) anything else that is solid in the scene.
+			if _physics_ready and _hits_object(x, h, z, s):
+				continue
 			var basis := Basis(Vector3.UP, yaw) * Basis.from_scale(Vector3(s, s * hr, s))
 			var sink := 0.1 + slope_t * 0.8 * s                      # sunk a touch (more on a slope) so the roots meet the ground
 			xf.append(Transform3D(basis, Vector3(x, h - sink, z)))
 			scl.append(s)
 			p2.append(Vector2(x, z))
 	var d := { "n": xf.size(), "xf": xf, "scl": scl, "p2": p2 }
-	_cells[key] = d
+	if _physics_ready:                                  # (before the physics world is ready the result isn't kept, so it is redone later)
+		_cells[key] = d
 	return d
+
+
+## True if a tree standing here would overlap another solid object (a rock, a building, a prop...). Looks at the trunk
+## and at the blossom crown. The ground itself, the other trees, and anything that moves (you, enemies, corpses) are ignored.
+func _hits_object(x: float, h: float, z: float, s: float) -> bool:
+	if _probe_trunk == null:
+		_probe_trunk = CylinderShape3D.new()
+		_probe_crown = CylinderShape3D.new()
+	var space := get_world_3d().direct_space_state
+	# Trunk: starts a little above the ground so a slope under it doesn't count as an object.
+	_probe_trunk.radius = trunk_radius * s + object_clearance
+	_probe_trunk.height = 4.0 * s
+	if _probe_overlaps(space, _probe_trunk, Vector3(x, h + 0.8 + _probe_trunk.height * 0.5, z)):
+		return true
+	# Crown: the blossom cloud up high.
+	_probe_crown.radius = canopy_clearance_radius * s
+	_probe_crown.height = 3.0 * s
+	return _probe_overlaps(space, _probe_crown, Vector3(x, h + 4.0 * s, z))
+
+
+func _probe_overlaps(space: PhysicsDirectSpaceState3D, shape: Shape3D, at: Vector3) -> bool:
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = shape
+	q.transform = Transform3D(Basis.IDENTITY, at)
+	q.collide_with_areas = false
+	for hit in space.intersect_shape(q, 8):
+		var body := hit["collider"] as Node
+		if body == null or not (body is StaticBody3D):
+			continue
+		if terrain != null and terrain.is_ancestor_of(body):
+			continue                                    # the ground (and its safety floor)
+		if is_ancestor_of(body):
+			continue                                    # our own trunk collisions
+		return true
+	return false
 
 
 ## True if this spot is inside a tree trunk (plus `extra` metres of clearance). Used by enemy_spawner.gd.
 func is_blocked_at(pos: Vector3, extra := 0.0) -> bool:
-	if not _ensure_logic():
+	# Before the physics world is ready the tree cells can't be worked out properly yet, so say "not blocked" for now
+	# instead of doing the work twice.
+	if not _physics_ready or not _ensure_logic():
 		return false
 	var reach := trunk_radius * scale_max + extra
+	var margin := jitter * 0.5 * spacing               # a tree can stand this far outside its own cell
 	var here := Vector2(pos.x, pos.z)
 	var base := _cell_of(pos)
 	for dx in range(-1, 2):
@@ -339,8 +415,8 @@ func is_blocked_at(pos: Vector3, extra := 0.0) -> bool:
 			# skip neighbouring cells that are too far away to hold a tree touching this spot
 			var lo_x := key.x * cell_size
 			var lo_z := key.y * cell_size
-			var gx := maxf(maxf(lo_x - pos.x, pos.x - (lo_x + cell_size)), 0.0)
-			var gz := maxf(maxf(lo_z - pos.z, pos.z - (lo_z + cell_size)), 0.0)
+			var gx := maxf(maxf(lo_x - margin - pos.x, pos.x - (lo_x + cell_size + margin)), 0.0)
+			var gz := maxf(maxf(lo_z - margin - pos.z, pos.z - (lo_z + cell_size + margin)), 0.0)
 			if gx * gx + gz * gz > reach * reach:
 				continue
 			var d := _get_cell(key)
@@ -380,16 +456,15 @@ func _update(pos: Vector3) -> void:
 	_build_queue = list
 
 	_free_queue.clear()
+	_upgrade_queue.clear()
 	for key in _built.keys():
 		if _dist2(key, pos) > reach_free * reach_free:
 			_free_queue.append(key)
-
-	# Cells you are walking towards need their nearer detail levels added (far cells only ever build the cheapest one).
-	_upgrade_queue.clear()
-	for key in _built.keys():
-		var need := _lods_needed(key, pos)
-		if (need & ~int(_lod_mask.get(key, 0))) != 0:
-			_upgrade_queue.append(key)
+		elif _built[key] != null:
+			# Cells you are walking towards need their nearer detail levels added (far cells only ever build the cheapest one).
+			var need := _lods_needed(key, pos)
+			if (need & ~int(_lod_mask.get(key, 0))) != 0:
+				_upgrade_queue.append(key)
 	_upgrade_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return _dist2(a, pos) > _dist2(b, pos))
 
 	# ---- collision ----
@@ -446,11 +521,9 @@ func _update(pos: Vector3) -> void:
 func _lods_needed(key: Vector2i, pos: Vector3) -> int:
 	var d := sqrt(_dist2(key, pos))
 	var half := cell_size * 0.7072                      # half the cell's diagonal: its trees can be this much nearer or further than its centre
-	var begins := [0.0, lod0_distance - lod_overlap, lod1_distance - lod_overlap]
-	var ends := [lod0_distance, lod1_distance, draw_distance + cell_size * 1.5]
 	var m := 0
 	for lod in 3:
-		if d - half - 30.0 <= float(ends[lod]) and d + half + 30.0 >= float(begins[lod]):
+		if d - half - 30.0 <= _lod_ends[lod] and d + half + 30.0 >= _lod_begins[lod]:
 			m |= 1 << lod
 	return m
 
@@ -458,14 +531,15 @@ func _lods_needed(key: Vector2i, pos: Vector3) -> int:
 func _build_cell(key: Vector2i) -> void:
 	var d := _get_cell(key)
 	var n: int = d["n"]
+	if n == 0:
+		_built[key] = null                              # nothing to draw: no node needed
+		_lod_mask[key] = 7
+		return
 	var holder := Node3D.new()
 	holder.top_level = true                             # placed in world space, wherever this node sits
 	add_child(holder)
 	holder.global_position = _cell_centre(key)
 	_built[key] = holder
-	if n == 0:
-		_lod_mask[key] = 7
-		return
 	_lod_mask[key] = 0
 	_add_lods(key, _lods_needed(key, _focus()))
 
@@ -480,8 +554,6 @@ func _add_lods(key: Vector2i, mask: int) -> void:
 	var centre := _cell_centre(key)
 	var xfs: Array = d["xf"]
 	var casts := [lod0_casts_shadows, lod1_casts_shadows, false]
-	var begins := [0.0, lod0_distance - lod_overlap, lod1_distance - lod_overlap]
-	var ends := [lod0_distance, lod1_distance, draw_distance + cell_size * 1.5]
 	for lod in 3:
 		if (mask & (1 << lod)) == 0:
 			continue
@@ -497,8 +569,8 @@ func _add_lods(key: Vector2i, mask: int) -> void:
 		mmi.multimesh = mm
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if casts[lod] else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
-		mmi.visibility_range_begin = begins[lod]
-		mmi.visibility_range_end = ends[lod]
+		mmi.visibility_range_begin = _lod_begins[lod]
+		mmi.visibility_range_end = _lod_ends[lod]
 		(holder as Node3D).add_child(mmi)
 	_lod_mask[key] = int(_lod_mask.get(key, 0)) | mask
 

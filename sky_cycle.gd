@@ -51,7 +51,7 @@ extends Node3D
 # -------------------------
 # TIME
 # -------------------------
-@export var cycle_speed: float = 60.0         # seconds for one full day (60 = a one-minute day)
+@export var cycle_speed: float = 2400.0       # seconds for one full day + night (2400 = 20 minutes of day and 20 minutes of night)
 @export_range(0.0, 1.0) var start_time := 0.3 # 0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset
 @export var running := true
 
@@ -141,7 +141,7 @@ extends Node3D
 @export var saturation := 0.82                              # dusk saturation (day and night have their own above)
 @export var contrast := 0.98
 @export var ssao_enabled := true
-@export var ssil_enabled := true                            # cheap screen-space bounce light
+@export var ssil_enabled := false                           # screen-space bounce light: nice but costly, so off by default
 @export var sdfgi_enabled := false                          # real bounce light everywhere; Forward+ only, costs more
 @export var glow_enabled := true
 @export var glow_intensity := 0.45
@@ -389,7 +389,7 @@ func _setup_environment() -> void:
 	if env.sky == null:
 		env.sky = Sky.new()
 	env.sky.sky_material = sky_mat
-	env.sky.process_mode = Sky.PROCESS_MODE_REALTIME   # the sky changes every frame (time of day, twinkling stars)
+	env.sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL   # the sky only needs its reflection map refreshed gradually (the day is 40 minutes long now)
 	env.sky.radiance_size = Sky.RADIANCE_SIZE_64
 
 

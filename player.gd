@@ -9,7 +9,7 @@ extends CharacterBody3D
 @export var crouch_lerp_speed := 10.0
 
 # -------------------------
-# PLAYER SHADOW (NEW) — an invisible capsule that only casts a shadow (first-person has no body mesh)
+# PLAYER SHADOW — an invisible capsule that only casts a shadow (first-person has no body mesh)
 # -------------------------
 @export var player_shadow_enabled := true
 var shadow_mesh: MeshInstance3D
@@ -39,8 +39,8 @@ var sprint_ramp := 0.0  # 0..1, how "spooled up" the current sprint is
 # -------------------------
 @export var max_stamina := 15.0          # raised from 10 (with dash_stamina_cost 3 that's 5 dashes)
 @export var stamina_drain_rate := 1.0        # stamina lost per second while actively sprinting
-@export var stamina_regen_rate := 4.0        # CHANGED (was 1.6): stamina gained per second once recovering
-@export var stamina_regen_delay := 0.5       # CHANGED (was 0.8): seconds after you stop sprinting before regen kicks in
+@export var stamina_regen_rate := 4.0        # stamina gained per second once recovering
+@export var stamina_regen_delay := 0.5       # seconds after you stop sprinting before regen kicks in
 @export var min_stamina_to_sprint := 0.5     # can't START a new sprint below this
 @export var low_stamina_speed_mult := 0.55   # sprint speed multiplier once fully gassed
 @export var stamina_taper_ratio := 0.3       # below this fraction of max stamina, speed starts tapering
@@ -48,7 +48,7 @@ var sprint_ramp := 0.0  # 0..1, how "spooled up" the current sprint is
 var stamina := 15.0
 var stamina_regen_timer := 0.0
 
-# NEW: each jump takes one chunk of stamina (nothing more is drained while you're in the air); hitting a wall gives it back.
+# Each jump takes one chunk of stamina (nothing more is drained while you're in the air); hitting a wall gives it back.
 @export var jump_stamina_cost := 1.5          # one-time stamina taken per ground jump / bunny hop (never blocks the jump; bottoms out at 0)
 @export var wall_hit_stamina_burst := 2.0     # instant stamina gained the moment you hit a wall in the air
 @export var wall_stamina_regen_rate := 6.0    # stamina gained per second while touching / clinging to a wall
@@ -96,8 +96,10 @@ signal stats_changed
 signal died
 signal shield_broken   # shield just hit zero from a hit (good hook for a sound / screen flash)
 signal respawned       # fired after the player comes back to life
-signal knocked_down    # NEW: an air roll was botched and you hit the floor (hook a thud sound here)
-signal roll_wall_bounced # NEW: a roll hit a wall and kicked you off it
+signal knocked_down    # an air roll was botched and you hit the floor (hook a thud sound here)
+signal roll_wall_bounced # a roll hit a wall and kicked you off it
+signal burrow_started  # NEW: you started sinking into the ground (hook a sound here)
+signal burrow_finished # NEW: you popped out of the ground
 
 # -------------------------
 # JUMP BOOST SYSTEM
@@ -128,25 +130,25 @@ signal roll_wall_bounced # NEW: a roll hit a wall and kicked you off it
 @export var roll_exit_momentum := 0.7       # fraction of roll speed kept when it ends
 @export var roll_grants_iframes := true
 @export var roll_iframe_time := 0.3         # seconds of invulnerability at the start of a roll
-@export var roll_full_spin := true            # true = visible full camera roll; false = gentle tilt only (GROUND rolls)
-@export var roll_spin_degrees := 360.0        # how far the camera rotates during a ground roll
+@export var roll_full_spin := true            # true = visible full camera flip (it now pivots at the side of your body and stays above the ground)
+@export var roll_spin_degrees := 360.0        # how far the camera rotates during a ground roll (only if roll_full_spin is on)
 @export var roll_camera_tilt_degrees := 12.0  # tilt amount used when roll_full_spin is off
 # Comfort aids while rolling: a vignette hides the fast-moving screen edges and a narrower FOV
 # reduces peripheral motion — both are well-known ways to cut motion sickness.
 @export var roll_vignette_boost := 0.5        # extra squint-vignette during a ground roll (needs the eyelid overlay)
 @export var roll_fov_change := -4.0           # FOV added during a ground roll (negative = narrower)
-@export var roll_fov_kick := 6.0              # NEW: extra FOV that follows the speed surge, so the launch feels fast
-@export var ground_roll_surge := 0.25         # NEW: extra speed at the start of a ground roll, as a fraction of its speed
-# NEW: the camera flips around the edge of your body on the side you roll toward (right roll = right edge,
-# back roll = back edge), instead of spinning on the spot.
-@export var roll_pivot_edge_scale := 1.0      # how far out the pivot sits: 1 = the body's edge, 0 = old spin-on-the-spot
+@export var roll_fov_kick := 6.0              # extra FOV that follows the speed surge, so the launch feels fast
+@export var ground_roll_surge := 0.25         # extra speed at the start of a ground roll, as a fraction of its speed
+# The camera can flip around the edge of your body on the side you roll toward. 0 = it stays put and just tilts
+# (no more swinging down through the ground).
+@export var roll_pivot_edge_scale := 1.0      # how far out the pivot sits: 1 = the body's edge, 0 = spin on the spot
 @export var roll_pivot_height_offset := 0.0   # pivot height relative to the camera (metres; negative = lower, like the shoulder/hip)
 @export var roll_camera_min_height := 0.45    # the camera never drops below this height above your feet during a roll (raise it if it still clips)
 
 var _roll_cam_offset := Vector3.ZERO           # camera shift currently applied for the pivot (removed before the camera is repositioned)
 
 # -------------------------
-# AIR ROLL (NEW) — easier on the eyes than the ground roll
+# AIR ROLL — easier on the eyes than the ground roll
 # -------------------------
 # Air rolls NEVER move or rotate the camera. Instead the momentum comes from SPEED: you surge forward a
 # little in the roll direction, then ease back down to the speed you came in with.
@@ -161,7 +163,7 @@ var _roll_cam_offset := Vector3.ZERO           # camera shift currently applied 
 @export var air_roll_complete_progress := 0.7
 
 # -------------------------
-# ROLL WITH THE MOVEMENT KEYS (NEW)
+# ROLL WITH THE MOVEMENT KEYS
 # -------------------------
 # Double-tap a movement key (W/A/S/D or stick) to roll that way — no mouse, no crouch, no extra button.
 # Works on the ground and in the air. The normal dash button still works too.
@@ -175,7 +177,7 @@ var roll_request_dir := Vector2.ZERO           # local input direction (x = righ
 var roll_buffer_timer := 0.0
 
 # -------------------------
-# FAILED ROLL / KNOCKDOWN (NEW)
+# FAILED ROLL / KNOCKDOWN
 # -------------------------
 @export var knockdown_duration := 0.6          # total seconds on the ground before you can act again (keep under 1s)
 @export var knockdown_friction := 14.0         # how quickly you skid to a stop while down
@@ -183,7 +185,7 @@ var roll_buffer_timer := 0.0
 @export var knockdown_camera_drop := 0.3       # extra camera height lost while down (rises back up as you get up)
 
 # -------------------------
-# ROLL INTO WALL = WALL BOUNCE (NEW)
+# ROLL INTO WALL = WALL BOUNCE
 # -------------------------
 @export var roll_wall_bounce := true
 @export var roll_wall_bounce_speed_mult := 1.0       # how much of the roll's speed carries into the bounce
@@ -193,19 +195,49 @@ var roll_buffer_timer := 0.0
 
 var is_dashing := false
 var is_rolling := false                     # true while a crouched dash (roll) is happening
-var roll_is_air := false                    # NEW: this roll was started in mid-air
-var roll_can_botch := true                  # NEW: false when the hop was too short to finish an air roll (so landing early is fine)
+var roll_is_air := false                    # this roll was started in mid-air
+var roll_can_botch := true                  # false when the hop was too short to finish an air roll (so landing early is fine)
 var roll_progress := 0.0                    # 0..1 through the current roll (drives the camera spin)
 var roll_current_speed := 0.0               # speed of the current roll (never slower than the speed you started it at)
 var dash_timer := 0.0
 var dash_cooldown_timer := 0.0
 var dash_direction := Vector3.ZERO
 
-# NEW: knockdown state. Weapon scripts can check player.is_knocked_down to block shooting while down.
+# Knockdown state. Weapon scripts can check player.is_knocked_down to block shooting while down.
 var is_knocked_down := false
 var knockdown_timer := 0.0
 var knockdown_tilt_sign := 1.0
 var restore_camera_pitch := false
+
+# -------------------------
+# BURROW (E) — NEW: sink into the ground, come out behind the nearest enemy (or ahead if none)
+# -------------------------
+@export var burrow_enabled := true
+@export var burrow_distance := 8.0          # how far ahead you come out when no enemy is near
+@export var burrow_enemy_range := 30.0      # nearest enemy within this range is the target
+@export var burrow_behind_distance := 2.0   # how far behind the enemy you come out
+@export var burrow_sink_time := 0.3
+@export var burrow_rise_time := 0.3
+@export var burrow_depth := 2.2             # how far down you sink (deeper than the camera height so the screen goes under)
+@export var burrow_cooldown := 3.0
+@export var burrow_pop_velocity := 5.0
+@export var burrow_travel_time := 0.3       # NEW: how long the shadow streak takes to race to the exit spot
+@export var burrow_stealth_time := 1.5      # NEW: enemies can't see or hear you for this long after you come out
+@export var burrow_shadow_enabled := true   # NEW: dark pools, wisps and a shadow streak
+
+var is_burrowing := false
+var burrow_phase := 0                       # 1 = sinking, 2 = shadow travel, 3 = rising
+var burrow_timer := 0.0
+var burrow_cooldown_timer := 0.0
+var burrow_start := Vector3.ZERO
+var burrow_exit := Vector3.ZERO
+var burrow_look = null                      # world position to face when you come out (null = keep facing)
+var burrow_yaw := 0.0
+var stealth_timer := 0.0                    # NEW: while > 0, enemies can't notice you (enemy.gd reads this)
+var _shadow_shader: Shader = null
+var _shadow_streak: MeshInstance3D = null
+var _shadow_streak_mat: ShaderMaterial = null
+var _shadow_trail: CPUParticles3D = null
 
 # -------------------------
 # GROUND SLAM (press crouch in the air)
@@ -348,7 +380,7 @@ var both_flash := 0.0
 var damage_flash_rect: ColorRect
 
 # -------------------------
-# WEAPON CLIP GUARD (NEW) — the gun never pokes through the ground or walls
+# WEAPON CLIP GUARD — the gun never pokes through the ground or walls
 # -------------------------
 # Every frame a couple of rays are cast from the camera / gun to the muzzle. If the barrel would end up inside
 # level geometry, the gun is pulled back toward you and tilted up just enough to stay outside it, then eases
@@ -372,6 +404,8 @@ var _weapon_clip_amount := 0.0
 var _weapon_clip_pos := Vector3.ZERO   # offset currently applied to the weapon (removed at the start of each frame)
 var _weapon_clip_rot := 0.0
 
+var head_base_pos := Vector3.ZERO   # NEW: where the Head node sits in the scene (see _update_head_pivot)
+
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -389,6 +423,7 @@ func _ready() -> void:
 
 	base_camera_pos = camera.position
 	base_camera_rot_x = camera.rotation.x
+	head_base_pos = head.position
 
 	stamina = max_stamina
 	health = max_health
@@ -408,12 +443,19 @@ func _ready() -> void:
 		if weapon_draw_on_top:
 			_make_weapon_draw_on_top()
 
+	# NEW: E = burrow. Added in code so you don't have to set it up in Project Settings (change KEY_E here if E is taken).
+	if not InputMap.has_action("burrow"):
+		InputMap.add_action("burrow")
+		var ev := InputEventKey.new()
+		ev.physical_keycode = KEY_E
+		InputMap.action_add_event("burrow", ev)
+
 	_build_damage_flash()
-	_build_player_shadow()   # NEW
+	_build_player_shadow()
 
 
 func _input(event: InputEvent) -> void:
-	# NEW: double-tap a movement key = roll in that direction.
+	# Double-tap a movement key = roll in that direction.
 	if roll_double_tap_enabled and not is_dead and not event.is_echo():
 		var tap_dirs := {
 			"move_left": Vector2(-1, 0),
@@ -440,8 +482,16 @@ func _input(event: InputEvent) -> void:
 		)
 
 
+## NEW: looking up/down used to swing the camera around the Head node, which sits at your feet. This shifts the
+## Head so the camera turns on the spot at eye level instead (the camera itself never moves).
+func _update_head_pivot() -> void:
+	var c := camera.position
+	head.position = head_base_pos + c - head.transform.basis * c
+
+
 func _process(delta: float) -> void:
-	_update_player_shadow()   # NEW
+	_update_head_pivot()
+	_update_player_shadow()
 	_update_weapon_clip(delta)
 
 	# Damage flash: red for health hits, blue for shield hits. Both fade out smoothly.
@@ -475,8 +525,10 @@ func _process(delta: float) -> void:
 		if is_zooming:
 			target_squint += squint_zoom_boost
 		if is_rolling:
-			# NEW: air rolls use a much lighter vignette than ground rolls
+			# air rolls use a much lighter vignette than ground rolls
 			target_squint += air_roll_vignette_boost if roll_is_air else roll_vignette_boost
+		if is_burrowing:
+			target_squint = 1.0   # NEW: screen closes in while you're underground
 		target_squint = clampf(target_squint, 0.0, 1.0)
 
 		current_squint = lerp(current_squint, target_squint, squint_smoothing * delta)
@@ -490,6 +542,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		pitch -= event.relative.y * mouse_sensitivity
 		pitch = clamp(pitch, deg_to_rad(-89), deg_to_rad(89))
 		head.rotation.x = pitch
+		_update_head_pivot()
 
 
 func _physics_process(delta: float) -> void:
@@ -499,16 +552,27 @@ func _physics_process(delta: float) -> void:
 		return
 
 	dash_cooldown_timer = max(dash_cooldown_timer - delta, 0.0)
+	burrow_cooldown_timer = max(burrow_cooldown_timer - delta, 0.0)   # NEW
+	stealth_timer = max(stealth_timer - delta, 0.0)
 	knockback_timer = max(knockback_timer - delta, 0.0)
 
 	update_health_and_shield(delta)
 
-	# NEW: while knocked down you can't act — you skid, then get back up.
+	# While knocked down you can't act — you skid, then get back up.
 	if is_knocked_down:
 		_knockdown_physics(delta)
 		return
 
-	# NEW: rolling into a wall kicks you off it (checked before wall-cling so cling can't steal the roll).
+	# NEW: burrowing — you're underground, nothing else runs until you come back out.
+	if is_burrowing:
+		_burrow_physics(delta)
+		return
+	if burrow_enabled and Input.is_action_just_pressed("burrow") and burrow_cooldown_timer <= 0.0 and is_on_floor():
+		_start_burrow()
+		if is_burrowing:
+			return
+
+	# Rolling into a wall kicks you off it (checked before wall-cling so cling can't steal the roll).
 	if is_dashing and is_rolling and roll_wall_bounce and is_on_wall():
 		_try_roll_wall_bounce()
 
@@ -533,7 +597,7 @@ func _physics_process(delta: float) -> void:
 		"move_back"
 	)
 
-	# NEW: double-tap roll request (buffered briefly so a slightly-early tap still counts).
+	# Double-tap roll request (buffered briefly so a slightly-early tap still counts).
 	roll_buffer_timer = max(roll_buffer_timer - delta, 0.0)
 	if roll_request_pending:
 		if roll_buffer_timer <= 0.0:
@@ -563,7 +627,7 @@ func _physics_process(delta: float) -> void:
 	if Input.is_action_just_pressed("crouch") and not is_on_floor() and not is_slamming and not is_dashing:
 		start_slam()
 
-	# NEW: "and not is_dashing" — a roll no longer gets frozen in place by wall cling.
+	# "and not is_dashing" — a roll no longer gets frozen in place by wall cling.
 	if is_on_wall() and not is_on_floor() and not is_wall_clinging and not is_sliding and not is_slamming and not is_dashing and velocity.y < 0.0:
 		var space_state = get_world_3d().direct_space_state
 		var ray = PhysicsRayQueryParameters3D.create(
@@ -650,7 +714,7 @@ func _physics_process(delta: float) -> void:
 				stats_changed.emit()
 	was_wall_contact = wall_contact
 
-	# NEW: out of stamina = you stop running. A slide in progress is NOT touched, so it carries on until its momentum
+	# Out of stamina = you stop running. A slide in progress is NOT touched, so it carries on until its momentum
 	# dies or you end it yourself. Any extra speed fades slowly on its own (ground_overspeed_decel).
 	if is_sprinting and stamina <= 0.0:
 		is_sprinting = false
@@ -863,7 +927,7 @@ func _physics_process(delta: float) -> void:
 
 	move_and_slide()
 
-	# NEW: landed before finishing an air roll. If there was enough airtime to finish it, you botch it and tumble.
+	# Landed before finishing an air roll. If there was enough airtime to finish it, you botch it and tumble.
 	# If the hop was too short to ever finish it, the roll simply ends on landing and you keep your speed.
 	if is_dashing and is_rolling and roll_is_air and is_on_floor() \
 	and roll_progress < air_roll_complete_progress:
@@ -885,7 +949,349 @@ func _physics_process(delta: float) -> void:
 
 
 # -------------------------
-# PLAYER SHADOW (NEW)
+# BURROW (E) — NEW
+# -------------------------
+func _start_burrow() -> void:
+	var exit := _burrow_pick_exit()
+	if exit.is_empty():
+		return   # nowhere clear to come out: nothing happens, no cooldown spent
+	burrow_exit = exit["pos"]
+	burrow_look = exit["look"]
+	burrow_start = global_position
+
+	# Which way to face when you come out (toward the enemy, or the way you were already facing).
+	burrow_yaw = rotation.y
+	if burrow_look != null:
+		var dir: Vector3 = burrow_look - burrow_exit
+		dir.y = 0.0
+		if dir.length() > 0.1:
+			burrow_yaw = atan2(-dir.x, -dir.z)
+
+	is_dashing = false
+	is_rolling = false
+	roll_is_air = false
+	is_sliding = false
+	is_slamming = false
+	is_wall_clinging = false
+	is_sprinting = false
+	velocity = Vector3.ZERO
+
+	is_burrowing = true
+	burrow_phase = 1
+	burrow_timer = burrow_sink_time
+	stealth_timer = burrow_stealth_time
+
+	# Shadow effect: a dark pool opens under your feet and wisps of shadow curl up as you sink into it.
+	if burrow_shadow_enabled:
+		_spawn_shadow_pool(burrow_start + Vector3.UP * 0.1, 0.25, 1.3, burrow_sink_time, 0.15, 0.5)
+		_spawn_shadow_burst(burrow_start, 22)
+	burrow_started.emit()
+
+
+func _burrow_physics(delta: float) -> void:
+	_clear_roll_cam_offset()
+	velocity = Vector3.ZERO
+	invuln_timer = maxf(invuln_timer, 0.2)       # can't be hurt while underground
+	stealth_timer = burrow_stealth_time          # enemies can't see or hear you while you're gone
+	burrow_timer -= delta
+
+	if burrow_phase == 1:
+		# Sinking: ease down into the ground while the view squeezes in.
+		var t := 1.0 - clampf(burrow_timer / maxf(burrow_sink_time, 0.01), 0.0, 1.0)
+		global_position = burrow_start + Vector3.DOWN * burrow_depth * (t * t)
+		_burrow_fov(normal_fov - 14.0, delta)
+		if burrow_timer <= 0.0:
+			burrow_phase = 2
+			burrow_timer = maxf(burrow_travel_time, 0.01)
+			_begin_shadow_travel()
+	elif burrow_phase == 2:
+		# Racing underground as a shadow: a dark streak zips across the ground to the exit spot.
+		var t2 := 1.0 - clampf(burrow_timer / maxf(burrow_travel_time, 0.01), 0.0, 1.0)
+		var te := t2 * t2 * (3.0 - 2.0 * t2)
+		var along := burrow_start.lerp(burrow_exit, te)
+		global_position = along + Vector3.DOWN * burrow_depth
+		rotation.y = lerp_angle(rotation.y, burrow_yaw, 1.0 - exp(-14.0 * delta))
+		_burrow_fov(normal_fov + 26.0, delta)
+		_update_shadow_travel(along)
+		if burrow_timer <= 0.0:
+			global_position = burrow_exit + Vector3.DOWN * burrow_depth
+			rotation.y = burrow_yaw
+			_end_shadow_travel()
+			if burrow_shadow_enabled:
+				_spawn_shadow_pool(burrow_exit + Vector3.UP * 0.1, 0.4, 1.4, 0.2, 0.15, 0.6)
+				_spawn_shadow_burst(burrow_exit, 34)
+			burrow_phase = 3
+			burrow_timer = burrow_rise_time
+	else:
+		# Rising: come up out of the ground as the view snaps back to normal.
+		var t3 := 1.0 - clampf(burrow_timer / maxf(burrow_rise_time, 0.01), 0.0, 1.0)
+		var eased := 1.0 - (1.0 - t3) * (1.0 - t3)
+		global_position = burrow_exit + Vector3.DOWN * burrow_depth * (1.0 - eased)
+		_burrow_fov(normal_fov, delta)
+		if burrow_timer <= 0.0:
+			global_position = burrow_exit + Vector3.UP * 0.05
+			is_burrowing = false
+			burrow_phase = 0
+			burrow_cooldown_timer = burrow_cooldown
+			velocity = Vector3(0.0, burrow_pop_velocity, 0.0)
+			invuln_timer = maxf(invuln_timer, 0.4)
+			stealth_timer = burrow_stealth_time   # enemies stay blind to you for a moment after you pop out
+			was_on_floor = true   # so coming out doesn't count as a bunny-hop landing
+			burrow_finished.emit()
+
+
+func _burrow_fov(target: float, delta: float) -> void:
+	current_fov = lerpf(current_fov, target, 1.0 - exp(-12.0 * delta))
+	camera.fov = current_fov
+
+
+# -------------------------
+# SHADOW EFFECTS (burrow)
+# -------------------------
+
+## The dark, swirling pool material used for the sink pool, the exit pool and the travelling streak.
+func _make_shadow_material() -> ShaderMaterial:
+	if _shadow_shader == null:
+		_shadow_shader = Shader.new()
+		_shadow_shader.code = """
+shader_type spatial;
+render_mode unshaded, blend_mix, depth_draw_never, cull_disabled, shadows_disabled;
+uniform float fade = 1.0;
+uniform vec4 shade_color : source_color = vec4(0.02, 0.0, 0.06, 1.0);
+uniform vec4 rim_color : source_color = vec4(0.5, 0.12, 1.0, 1.0);
+void fragment() {
+	vec2 p = UV * 2.0 - 1.0;
+	float r = length(p);
+	float body = smoothstep(1.0, 0.5, r);
+	float ang = atan(p.y, p.x) + r * 3.5 - TIME * 7.0;
+	float swirl = 0.5 + 0.5 * sin(ang * 3.0);
+	float rings = 0.5 + 0.5 * sin(r * 24.0 - TIME * 14.0);
+	float rim = smoothstep(0.45, 0.85, r) * smoothstep(1.0, 0.8, r);
+	vec3 col = mix(shade_color.rgb, rim_color.rgb, rim * (0.35 + 0.65 * rings));
+	ALBEDO = col;
+	ALPHA = body * (0.7 + 0.3 * swirl) * fade * 0.95;
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = _shadow_shader
+	mat.set_shader_parameter("fade", 1.0)
+	return mat
+
+
+## A dark pool on the ground that opens up, holds for a moment, then fades away.
+func _spawn_shadow_pool(pos: Vector3, s0: float, s1: float, grow_time: float, hold: float, fade_time: float) -> void:
+	var mat := _make_shadow_material()
+	var mi := MeshInstance3D.new()
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(2.6, 2.6)
+	mi.mesh = pm
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	get_tree().current_scene.add_child(mi)
+	mi.global_position = pos
+	mi.scale = Vector3(s0, 1.0, s0)
+
+	var tw := create_tween()
+	tw.tween_property(mi, "scale", Vector3(s1, 1.0, s1), maxf(grow_time, 0.01)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_interval(hold)
+	tw.tween_method(func(v: float): mat.set_shader_parameter("fade", v), 1.0, 0.0, fade_time)
+	tw.tween_callback(mi.queue_free)
+
+
+## Wisps of dark purple smoke. Callers set .emitting = true once they've positioned it.
+func _make_shadow_particles(amount: int, lifetime: float, v_min: float, v_max: float, one_shot: bool, spread: float, gravity_y: float) -> CPUParticles3D:
+	var p := CPUParticles3D.new()
+	p.emitting = false
+	p.one_shot = one_shot
+	p.amount = amount
+	p.lifetime = lifetime
+	p.explosiveness = 0.9 if one_shot else 0.0
+	p.local_coords = false
+	p.direction = Vector3.UP
+	p.spread = spread
+	p.initial_velocity_min = v_min
+	p.initial_velocity_max = v_max
+	p.gravity = Vector3(0.0, gravity_y, 0.0)
+	p.damping_min = 1.0
+	p.damping_max = 2.5
+	p.scale_amount_min = 0.7
+	p.scale_amount_max = 1.5
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_SPHERE
+	p.emission_sphere_radius = 0.55
+
+	var curve := Curve.new()
+	curve.add_point(Vector2(0.0, 1.0))
+	curve.add_point(Vector2(1.0, 0.0))
+	p.scale_amount_curve = curve
+
+	var grad := Gradient.new()
+	grad.set_color(0, Color(0.55, 0.15, 1.0, 0.9))
+	grad.set_color(1, Color(0.02, 0.0, 0.05, 0.0))
+	grad.add_point(0.3, Color(0.06, 0.0, 0.12, 0.85))
+	p.color_ramp = grad
+
+	var sm := SphereMesh.new()
+	sm.radius = 0.14
+	sm.height = 0.28
+	sm.radial_segments = 8
+	sm.rings = 4
+	var pmat := StandardMaterial3D.new()
+	pmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	pmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	pmat.vertex_color_use_as_albedo = true
+	sm.material = pmat
+	p.mesh = sm
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	get_tree().current_scene.add_child(p)
+	return p
+
+
+## One burst of shadow wisps shooting up out of a spot.
+func _spawn_shadow_burst(pos: Vector3, amount: int) -> void:
+	var p := _make_shadow_particles(amount, 0.9, 2.5, 6.0, true, 60.0, -3.0)
+	p.global_position = pos + Vector3.UP * 0.15
+	p.emitting = true
+	get_tree().create_timer(2.0).timeout.connect(p.queue_free)
+
+
+## Starts the dark streak (a stretched pool plus a trail of wisps) that races across the ground while you're underground.
+func _begin_shadow_travel() -> void:
+	if not burrow_shadow_enabled:
+		return
+	_shadow_streak_mat = _make_shadow_material()
+	_shadow_streak = MeshInstance3D.new()
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(2.6, 2.6)
+	_shadow_streak.mesh = pm
+	_shadow_streak.material_override = _shadow_streak_mat
+	_shadow_streak.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	get_tree().current_scene.add_child(_shadow_streak)
+
+	var d := burrow_exit - burrow_start
+	d.y = 0.0
+	_shadow_streak.rotation.y = atan2(-d.x, -d.z) if d.length() > 0.1 else rotation.y
+	_shadow_streak.scale = Vector3(0.8, 1.0, 1.9)   # stretched along the direction of travel
+
+	_shadow_trail = _make_shadow_particles(40, 0.6, 0.3, 1.2, false, 25.0, 0.5)
+	_shadow_trail.emitting = true
+	_update_shadow_travel(burrow_start)
+
+
+func _update_shadow_travel(along: Vector3) -> void:
+	if _shadow_streak == null or not is_instance_valid(_shadow_streak):
+		return
+	var g = _find_ground(along)
+	var gp: Vector3 = along
+	if g != null:
+		gp = g
+	_shadow_streak.global_position = gp + Vector3.UP * 0.1
+	if _shadow_trail != null and is_instance_valid(_shadow_trail):
+		_shadow_trail.global_position = gp + Vector3.UP * 0.2
+
+
+func _end_shadow_travel() -> void:
+	if _shadow_streak != null and is_instance_valid(_shadow_streak):
+		var s := _shadow_streak
+		var m := _shadow_streak_mat
+		var tw := create_tween()
+		tw.tween_method(func(v: float): m.set_shader_parameter("fade", v), 1.0, 0.0, 0.3)
+		tw.tween_callback(s.queue_free)
+	_shadow_streak = null
+	_shadow_streak_mat = null
+	if _shadow_trail != null and is_instance_valid(_shadow_trail):
+		_shadow_trail.emitting = false
+		get_tree().create_timer(1.0).timeout.connect(_shadow_trail.queue_free)
+	_shadow_trail = null
+
+
+## Picks where to come out: behind the nearest living enemy, otherwise straight ahead.
+func _burrow_pick_exit() -> Dictionary:
+	var nearest: Node3D = null
+	var best_d := burrow_enemy_range
+	for e in get_tree().get_nodes_in_group("enemy"):
+		var en := e as Node3D
+		if en == null or e.get("is_dead") == true:
+			continue
+		var d := global_position.distance_to(en.global_position)
+		if d < best_d and d > 1.0:
+			best_d = d
+			nearest = en
+
+	if nearest != null:
+		var behind := nearest.global_transform.basis.z   # enemies face -Z, so +Z is behind them
+		behind.y = 0.0
+		behind = behind.normalized() * burrow_behind_distance
+		for a: float in [0.0, 40.0, -40.0, 80.0, -80.0]:
+			var spot: Vector3 = nearest.global_position + behind.rotated(Vector3.UP, deg_to_rad(a))
+			var ground = _find_ground(spot)
+			if ground != null and _spot_is_clear(ground):
+				return {"pos": ground, "look": nearest.global_position}
+
+	var fwd := -global_transform.basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized()
+	for f: float in [1.0, 0.7, 0.4]:
+		var spot2: Vector3 = global_position + fwd * burrow_distance * f
+		var ground2 = _find_ground(spot2)
+		if ground2 != null and _spot_is_clear(ground2):
+			return {"pos": ground2, "look": null}
+	return {}
+
+
+## Finds the terrain surface under a point (skips trees, rocks and enemies the ray passes through).
+func _find_ground(p: Vector3) -> Variant:
+	var space := get_world_3d().direct_space_state
+	var from := Vector3(p.x, global_position.y + 60.0, p.z)
+	var to := Vector3(p.x, global_position.y - 80.0, p.z)
+	var exclude: Array[RID] = [get_rid()]
+	var first_hit = null
+	for i in 6:
+		var q := PhysicsRayQueryParameters3D.create(from, to)
+		q.exclude = exclude
+		q.collision_mask = weapon_clip_mask
+		var r := space.intersect_ray(q)
+		if r.is_empty():
+			break
+		if first_hit == null:
+			first_hit = r.position
+		if _is_terrain_body(r.collider):
+			return r.position
+		exclude.append(r.rid)
+	return first_hit
+
+
+## True if this physics body belongs to the terrain (a chunk of ground_chunks.gd).
+func _is_terrain_body(col: Object) -> bool:
+	var n := col as Node
+	for i in 4:
+		if n == null:
+			return false
+		if n.has_method("height_at"):
+			return true
+		n = n.get_parent()
+	return false
+
+
+## True if nothing solid (other than the ground and enemies) is standing at this spot.
+func _spot_is_clear(pos: Vector3) -> bool:
+	var shape := SphereShape3D.new()
+	shape.radius = 0.45
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = shape
+	q.transform = Transform3D(Basis(), pos + Vector3.UP * 1.2)
+	q.collision_mask = weapon_clip_mask
+	q.exclude = [get_rid()]
+	for h in get_world_3d().direct_space_state.intersect_shape(q, 8):
+		var c = h.collider
+		if c == null or _is_terrain_body(c) or (c is Node and (c as Node).is_in_group("enemy")):
+			continue
+		return false
+	return true
+
+
+# -------------------------
+# PLAYER SHADOW
 # -------------------------
 
 ## An invisible capsule that only casts shadows (you never see it, but the sun and moon do).
@@ -1135,6 +1541,9 @@ func die(wait: float = -1.0) -> void:
 	is_rolling = false
 	roll_is_air = false
 	is_knocked_down = false
+	is_burrowing = false   # NEW
+	stealth_timer = 0.0
+	_end_shadow_travel()
 	roll_request_pending = false
 	is_slamming = false
 	is_wall_clinging = false
@@ -1161,6 +1570,9 @@ func respawn() -> void:
 	shield = max_shield
 	stamina = max_stamina
 	dash_cooldown_timer = 0.0
+	burrow_cooldown_timer = 0.0   # NEW
+	is_burrowing = false          # NEW
+	stealth_timer = 0.0
 	stamina_regen_timer = 0.0
 	shield_regen_timer = 0.0
 	health_regen_timer = 0.0
@@ -1231,7 +1643,7 @@ func update_health_and_shield(delta: float) -> void:
 # DASH / ROLL
 # -------------------------
 
-## NEW: one-time stamina chunk for a jump. Never blocks the jump — it just bottoms out at 0.
+## One-time stamina chunk for a jump. Never blocks the jump — it just bottoms out at 0.
 func _spend_jump_stamina() -> void:
 	if jump_stamina_cost <= 0.0:
 		return
@@ -1247,7 +1659,7 @@ func get_dash_charges() -> int:
 
 func start_dash(force_roll := false, tap_dir := Vector2.ZERO):
 	# Dashing while crouched, sliding, or in mid-air turns the dash into a roll.
-	# NEW: a double-tapped movement key (force_roll) is always a roll, even standing on the ground.
+	# A double-tapped movement key (force_roll) is always a roll, even standing on the ground.
 	var rolling := force_roll or is_crouching or is_sliding or not is_on_floor()
 
 	# Leaving a slide into a roll keeps you low; a normal dash out of a slide is not possible anymore.
@@ -1259,9 +1671,9 @@ func start_dash(force_roll := false, tap_dir := Vector2.ZERO):
 	is_sprinting = false
 
 	is_rolling = rolling
-	roll_is_air = rolling and not is_on_floor()   # NEW: air rolls get the gentler camera + the "must finish it" rule
-	# NEW: only count an early landing as a botched roll if the hop had enough airtime to finish it.
-	# NEW: an air dash goes out level: cancel the fall/rise at the start so you don't glide diagonally into the ground.
+	roll_is_air = rolling and not is_on_floor()   # air rolls get the gentler camera + the "must finish it" rule
+	# Only count an early landing as a botched roll if the hop had enough airtime to finish it.
+	# An air dash goes out level: cancel the fall/rise at the start so you don't glide diagonally into the ground.
 	if roll_is_air and air_roll_hold_height:
 		velocity.y = 0.0
 	roll_can_botch = roll_is_air and _air_time_estimate() >= roll_duration * air_roll_complete_progress
@@ -1297,7 +1709,7 @@ func start_dash(force_roll := false, tap_dir := Vector2.ZERO):
 	dash_direction = dir.normalized()
 
 
-## NEW: rough time (seconds) until you land, using the same gravity an air roll uses (rise, then the heavier fall).
+## Rough time (seconds) until you land, using the same gravity an air roll uses (rise, then the heavier fall).
 func _air_time_estimate() -> float:
 	var shape := collision.shape as CapsuleShape3D
 	if shape == null:
@@ -1337,17 +1749,17 @@ func _end_dash() -> void:
 		is_rolling = false
 		roll_is_air = false
 		roll_progress = 0.0
-		# A full 360° spin ends exactly where it started; snap the camera back to neutral.
+		# Snap the camera back to neutral.
 		camera.rotation.x = base_camera_rot_x
 		camera.rotation.z = 0.0
 
 
-## NEW: 0 -> 1 -> 0 bump over a roll (p = 0..1). Rises quickly (peak about 30% in) and eases back to 0 at the end.
+## 0 -> 1 -> 0 bump over a roll (p = 0..1). Rises quickly (peak about 30% in) and eases back to 0 at the end.
 func _roll_surge(p: float) -> float:
 	return sin(PI * pow(clampf(p, 0.0, 1.0), 0.6))
 
 
-## NEW: speed of the current roll at progress p (0..1).
+## Speed of the current roll at progress p (0..1).
 ## Air roll: entry speed -> small surge -> back to the entry speed (so nothing snaps when it ends).
 ## Ground roll: surge at the start, then settles to roll_exit_momentum of its speed.
 func _roll_speed_at(p: float) -> float:
@@ -1358,7 +1770,7 @@ func _roll_speed_at(p: float) -> float:
 	return roll_current_speed * settle * (1.0 + ground_roll_surge * surge)
 
 
-## NEW: a roll that runs head-on into a wall kicks you off it, like a wall jump.
+## A roll that runs head-on into a wall kicks you off it, like a wall jump.
 ## Returns true if the bounce happened.
 func _try_roll_wall_bounce() -> bool:
 	var n := get_wall_normal()
@@ -1510,7 +1922,7 @@ func stop_slide():
 
 	if can_stand_up():
 		is_crouching = false
-		# CHANGED: only go back to sprinting if there's stamina for it (so a slide that ends while you're gassed
+		# Only go back to sprinting if there's stamina for it (so a slide that ends while you're gassed
 		# doesn't put you straight back into a sprint that would be cut off again).
 		is_sprinting = stamina > min_stamina_to_sprint
 
@@ -1572,7 +1984,7 @@ func update_fov(delta: float) -> void:
 # CAMERA TILT
 # -------------------------
 func update_camera_tilt(delta: float) -> void:
-	# NEW: take off last frame's roll-pivot shift first, so the camera position is clean before anything else touches it.
+	# Take off last frame's roll-pivot shift first, so the camera position is clean before anything else touches it.
 	_clear_roll_cam_offset()
 
 	# Roll camera.
@@ -1585,8 +1997,8 @@ func update_camera_tilt(delta: float) -> void:
 			camera.rotation.z = lerp(camera.rotation.z, 0.0, 10.0 * delta)
 			return
 
-		# GROUND roll (unchanged): backward = back-flip, sideways = barrel roll, forward = no camera flip,
-		# or just a gentle tilt if roll_full_spin is off.
+		# GROUND roll: backward = back-flip, sideways = barrel roll, forward = no camera flip,
+		# or just a gentle tilt if roll_full_spin is off (the default now).
 		var amount: float
 		if roll_full_spin:
 			# Smoothstep easing: the spin starts and ends gently instead of snapping.
@@ -1597,23 +2009,21 @@ func update_camera_tilt(delta: float) -> void:
 			amount = deg_to_rad(roll_camera_tilt_degrees) * sin(roll_progress * PI)
 		# No front rolls: only a backward roll pitches the camera. Forward rolls get no flip
 		# (sideways rolls still barrel-roll via the z rotation below).
-		# Spin around ONE axis at the full angle, so diagonals do the whole flip too. (The old per-axis split
-		# scaled each part by the direction's x/z, so a 45° roll only reached ~70% of the spin.)
+		# Spin around ONE axis at the full angle, so diagonals do the whole flip too.
 		var spin_axis := Vector3(maxf(local_dir.z, 0.0), 0.0, -local_dir.x)
 		if spin_axis.length() > 0.01:
 			var axis_n := spin_axis.normalized()
 			var spin := Basis(axis_n, amount)
 			camera.basis = spin * Basis.from_euler(Vector3(base_camera_rot_x, 0.0, 0.0))
 
-			# NEW: pivot on the body's edge on the side being rolled toward. The axis is horizontal and perpendicular
-			# to that side, so the edge point is simply the (side) direction pushed out by the capsule radius.
+			# Pivot on the body's edge on the side being rolled toward. (Off by default now: roll_pivot_edge_scale = 0.)
 			var shape := collision.shape as CapsuleShape3D
 			if shape and roll_pivot_edge_scale > 0.0:
 				var edge_dir := Vector3(local_dir.x, 0.0, maxf(local_dir.z, 0.0)).normalized()
-				var pivot := edge_dir * shape.radius * roll_pivot_edge_scale
-				pivot.y = camera.position.y + roll_pivot_height_offset
-				# Orbit the camera's resting position around the pivot by the same rotation as the camera itself.
+				# The pivot sits level with the camera, out at the side of your body (true horizontal, even when looking up/down).
 				var rest := camera.position
+				var pivot := rest + head.transform.basis.inverse() * (edge_dir * shape.radius * roll_pivot_edge_scale + Vector3.UP * roll_pivot_height_offset)
+				# Orbit the camera's resting position around the pivot by the same rotation as the camera itself.
 				_roll_cam_offset = (pivot + spin * (rest - pivot)) - rest
 				camera.position += _roll_cam_offset
 
@@ -1627,7 +2037,7 @@ func update_camera_tilt(delta: float) -> void:
 					camera.position += lift
 		return
 
-	# NEW: knocked down — camera lists to one side and looks slightly down, easing back to level as you get up.
+	# Knocked down — camera lists to one side and looks slightly down, easing back to level as you get up.
 	if is_knocked_down:
 		var k := clampf(knockdown_timer / maxf(knockdown_duration, 0.01), 0.0, 1.0)
 		var target_z := deg_to_rad(knockdown_camera_tilt_degrees) * knockdown_tilt_sign * k
@@ -1645,7 +2055,7 @@ func update_camera_tilt(delta: float) -> void:
 
 	camera.rotation.z = lerp(camera.rotation.z, deg_to_rad(target_roll), 6.0 * delta)
 
-	# NEW: after a wall bounce / getting up, ease the camera pitch back to neutral (only then, so this
+	# After a wall bounce / getting up, ease the camera pitch back to neutral (only then, so this
 	# never fights anything else that touches camera.rotation.x, like recoil).
 	if restore_camera_pitch:
 		camera.rotation.x = lerp(camera.rotation.x, base_camera_rot_x, 8.0 * delta)
@@ -1661,7 +2071,7 @@ func update_camera_tilt(delta: float) -> void:
 # -------------------------
 # CROUCH
 # -------------------------
-## NEW: removes the camera shift that the roll pivot added last frame (a no-op when there isn't one).
+## Removes the camera shift that the roll pivot added last frame (a no-op when there isn't one).
 func _clear_roll_cam_offset() -> void:
 	if _roll_cam_offset != Vector3.ZERO:
 		camera.position -= _roll_cam_offset
@@ -1669,7 +2079,7 @@ func _clear_roll_cam_offset() -> void:
 
 
 func handle_crouch(delta: float) -> void:
-	_clear_roll_cam_offset()   # NEW: so the crouch height lerp works on the real camera position, not the pivot-shifted one
+	_clear_roll_cam_offset()   # so the crouch height lerp works on the real camera position, not the pivot-shifted one
 
 	var shape = collision.shape as CapsuleShape3D
 	if not shape:

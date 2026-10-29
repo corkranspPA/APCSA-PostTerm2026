@@ -9,9 +9,12 @@ extends Node3D
 ##   a short delay, but their COLLISION stays loaded (around you, and around anything in the groups listed below),
 ##   so enemies, bullets and anything else that is happening keeps running on solid ground. Nothing else in your game
 ##   is paused, hidden or touched by this script.
-## - NEW: level of detail. Chunks close to you are built at full detail, chunks further out at half and then a quarter
+## - Level of detail. Chunks close to you are built at full detail, chunks further out at half and then a quarter
 ##   of the detail. On top of a mountain, where almost the whole world is in view, this makes generating and drawing the
 ##   distant ground many times cheaper. Small "skirts" under each chunk's edge hide any crack between two detail levels.
+## - NEW: background threads. Working out a chunk's ground (thousands of noise lookups) used to happen in the middle of a
+##   frame and caused stutters while you ran. Now it is done on worker threads, and the main thread only turns finished
+##   chunks into meshes and collision, a couple per frame.
 ##
 ## Handy for your other scripts:  get_node("Terrain").height_at(x, z)  returns the ground height at any spot.
 
@@ -23,7 +26,8 @@ extends Node3D
 @export var chunk_size := 32.0                         # metres per chunk side
 @export var chunk_resolution := 24                     # grid cells per chunk side at FULL detail (higher = smoother ground, slower to generate)
 @export var render_distance := 16                      # how many chunks out can be drawn (radius). 16 x 32 m = 512 m
-@export var chunks_per_frame := 2                      # how much new ground may be generated per frame (a full-detail chunk counts 1, far chunks count much less)
+@export var max_jobs := 3                              # NEW: chunks being worked out on background threads at once (raise on a many-core PC)
+@export var installs_per_frame := 2                    # NEW: finished chunks turned into meshes / collision per frame (lower if it stutters)
 
 # -------------------------
 # TERRAIN SHAPE
@@ -64,14 +68,13 @@ extends Node3D
 @export_range(0.0, 1.0) var grass_roughness := 1.0
 
 # -------------------------
-# LEVEL OF DETAIL (NEW) - the main fix for lag when standing on a mountain
+# LEVEL OF DETAIL - the main fix for lag when standing on a mountain
 # -------------------------
 @export_group("Level of detail")
 @export var lod_enabled := true                        # off = every chunk at full detail, like before
 @export var lod_full_chunks := 6                       # chunks this close (radius) are full detail. Never below physics_radius + 1
 @export var lod_mid_chunks := 11                       # up to here: half detail. Beyond: a quarter of the detail
 @export var skirt_depth := 4.0                         # how far the edge skirts hang down to hide cracks between detail levels (metres)
-@export var regen_per_frame := 1                       # chunks re-built per frame when they change detail level as you move
 
 # -------------------------
 # ONLY DRAW WHAT YOU CAN SEE
@@ -103,6 +106,8 @@ var _n_mask: FastNoiseLite
 var _n_ridge: FastNoiseLite
 var _n_patch: FastNoiseLite
 var _mtn_cells := {}                                   # Vector2i -> Vector4(x, z, radius, height) for each mountain slot (height 0 = none)
+var _mtn_mutex := Mutex.new()                          # the mountain memory is used from several threads, so it is locked
+var _idx_mutex := Mutex.new()
 var _material: StandardMaterial3D
 var _tint_k := 1.0
 
@@ -113,6 +118,9 @@ var _queue: Array[Vector2i] = []                       # chunks waiting to be ge
 var _bg_queue: Array[Vector2i] = []                    # chunks to build quietly in the background (behind / beside you)
 var _mesh_queue: Array[Vector2i] = []                  # chunks whose mesh needs making or showing (nearest last)
 var _regen_queue: Array[Vector2i] = []                 # chunks that should be re-built at a different detail level (nearest last)
+var _jobs := {}                                        # Vector2i -> { "id": worker task, "regen": bool } chunks being worked out on threads
+var _results := {}                                     # Vector2i -> finished chunk data, waiting to be installed (filled by the threads)
+var _res_mutex := Mutex.new()
 var _data_time := {}                                   # Vector2i -> last time (seconds) the built ground of this chunk was worth keeping
 var _indices_cache := {}                               # grid resolution -> triangle list (the same for every chunk of that detail), built once
 var _centre_chunk := Vector2i.ZERO                     # the chunk the player is in (updated with the view)
@@ -126,6 +134,11 @@ func _ready() -> void:
 	_setup_noise()
 	_material = _make_material()
 	_tint_k = grass_color_strength if grass_texture != null else 1.0
+
+	# Build the shared triangle lists now, so the worker threads only ever read them.
+	for t in 3:
+		var rr := _res_of_tier(t)
+		_get_indices(rr, rr + 1)
 
 	if safety_floor:
 		var body := StaticBody3D.new()
@@ -143,6 +156,13 @@ func _ready() -> void:
 		_spawn(_queue.pop_back(), true)
 
 
+func _exit_tree() -> void:
+	# Let any running worker finish before the script goes away.
+	for key in _jobs.keys():
+		WorkerThreadPool.wait_for_task_completion(int((_jobs[key] as Dictionary)["id"]))
+	_jobs.clear()
+
+
 func _process(delta: float) -> void:
 	if not _ready_done:
 		return
@@ -150,8 +170,8 @@ func _process(delta: float) -> void:
 	if _timer <= 0.0:
 		_timer = update_interval
 		_update_chunks()
-	_spawn_from_queue(float(chunks_per_frame))
-	_regen_chunks(regen_per_frame)
+	_collect_jobs(installs_per_frame)
+	_dispatch_jobs()
 	_build_meshes(meshes_per_frame)
 
 
@@ -182,6 +202,7 @@ func _setup_noise() -> void:
 
 
 ## The ground height at any world position. Use this to place things on the ground, even in chunks that aren't loaded.
+## (Safe to call from any thread.)
 func height_at(x: float, z: float) -> float:
 	var plains := 0.3 + 0.7 * smoothstep(-0.35, 0.45, _n_plains.get_noise_2d(x, z))   # flat regions and hilly regions
 	var h := _n_hills.get_noise_2d(x, z) * hill_height * plains
@@ -208,8 +229,13 @@ func height_at(x: float, z: float) -> float:
 ## Each square slot of the world (mountain_spacing metres wide) may hold ONE mountain, decided by the seed alone,
 ## so the same mountain is always in the same place. Returns Vector4(x, z, radius, height); height 0 = no mountain.
 func _mountain_at(cell: Vector2i) -> Vector4:
+	_mtn_mutex.lock()
 	if _mtn_cells.has(cell):
-		return _mtn_cells[cell]
+		var cached: Vector4 = _mtn_cells[cell]
+		_mtn_mutex.unlock()
+		return cached
+	_mtn_mutex.unlock()
+
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(Vector3i(_seed, cell.x, cell.y))
 	var res := Vector4.ZERO
@@ -220,7 +246,9 @@ func _mountain_at(cell: Vector2i) -> Vector4:
 		var height := mountain_height * rng.randf_range(0.6, 1.0)
 		if sqrt(mx * mx + mz * mz) > radius + spawn_flat_radius * 2.0:   # never on top of the spawn area
 			res = Vector4(mx, mz, radius, height)
+	_mtn_mutex.lock()
 	_mtn_cells[cell] = res
+	_mtn_mutex.unlock()
 	return res
 
 
@@ -261,18 +289,9 @@ func _res_of_tier(tier: int) -> int:
 	return res
 
 
-## How much of the per-frame generation budget a chunk of this detail level uses up (far chunks are much cheaper).
-func _tier_cost(key: Vector2i) -> float:
-	var t := _tier_at((key - _centre_chunk).length())
-	if t == 1:
-		return 0.35
-	if t == 2:
-		return 0.12
-	return 1.0
-
-
 # -------------------------
 # BUILDING A CHUNK (the arrays are kept so its mesh can be re-made cheaply when you turn back)
+# Runs on a worker thread, so it only reads settings and the noise, and never touches the scene.
 # -------------------------
 func _generate(key: Vector2i, tier: int) -> Dictionary:
 	var res := _res_of_tier(tier)
@@ -346,8 +365,11 @@ func _edge_vertex(e: int, k: int, n: int) -> int:
 
 ## The triangle list is identical for every chunk of the same detail, so it is built once per detail level and shared.
 func _get_indices(res: int, n: int) -> PackedInt32Array:
+	_idx_mutex.lock()
 	if _indices_cache.has(res):
-		return _indices_cache[res]
+		var cached: PackedInt32Array = _indices_cache[res]
+		_idx_mutex.unlock()
+		return cached
 	var indices := PackedInt32Array()
 	for iz in res:
 		for ix in res:
@@ -366,6 +388,7 @@ func _get_indices(res: int, n: int) -> PackedInt32Array:
 			var b2 := a2 + 1
 			indices.append_array(PackedInt32Array([a, b, b2, a, b2, a2, a, b2, b, a, a2, b2]))
 	_indices_cache[res] = indices
+	_idx_mutex.unlock()
 	return indices
 
 
@@ -388,6 +411,107 @@ func _make_material() -> StandardMaterial3D:
 			m.normal_texture = grass_normal_texture
 			m.normal_scale = grass_normal_strength
 	return m
+
+
+# -------------------------
+# WORKER THREADS
+# -------------------------
+## Runs on a worker thread: works out one chunk's ground and leaves it in _results for the main thread to pick up.
+func _job(key: Vector2i, tier: int) -> void:
+	var data := _generate(key, tier)
+	_res_mutex.lock()
+	_results[key] = data
+	_res_mutex.unlock()
+
+
+## Starts new chunks on worker threads (up to max_jobs at a time): first the chunks you need now, then chunks that
+## should change detail level, then the ground behind you.
+func _dispatch_jobs() -> void:
+	while _jobs.size() < max_jobs:
+		var key := Vector2i.ZERO
+		var found := false
+		var regen := false
+
+		while _queue.size() > 0 and not found:
+			var k: Vector2i = _queue.pop_back()
+			if not _chunks.has(k) and not _jobs.has(k):
+				key = k
+				found = true
+		while not found and _regen_queue.size() > 0:
+			var rk: Vector2i = _regen_queue.pop_back()
+			var rc = _chunks.get(rk)
+			if rc != null and not _jobs.has(rk) and int(rc["data"]["tier"]) != _tier_at((rk - _centre_chunk).length()):
+				key = rk
+				found = true
+				regen = true
+		while not found and pregenerate_behind and _bg_queue.size() > 0:
+			var bk: Vector2i = _bg_queue.pop_back()
+			if not _chunks.has(bk) and not _jobs.has(bk):
+				key = bk
+				found = true
+		if not found:
+			return
+
+		var tier := _tier_at((key - _centre_chunk).length())
+		var id := WorkerThreadPool.add_task(_job.bind(key, tier), false, "terrain chunk")
+		_jobs[key] = { "id": id, "regen": regen }
+
+
+## Picks up chunks the threads have finished and turns them into meshes and collision (a few per frame).
+func _collect_jobs(budget: int) -> void:
+	var done := 0
+	for key in _jobs.keys():
+		if done >= budget:
+			return
+		var j: Dictionary = _jobs[key]
+		var id := int(j["id"])
+		if not WorkerThreadPool.is_task_completed(id):
+			continue
+		WorkerThreadPool.wait_for_task_completion(id)
+		_jobs.erase(key)
+		_res_mutex.lock()
+		var data = _results.get(key)
+		_results.erase(key)
+		_res_mutex.unlock()
+		if data == null:
+			continue
+		_install(key, data, bool(j["regen"]))
+		done += 1
+
+
+func _install(key: Vector2i, data: Dictionary, regen: bool) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+
+	if regen:
+		# A chunk that changed detail level: swap its mesh and collision in place, so no hole appears.
+		var c = _chunks.get(key)
+		if c == null:
+			return
+		c["data"] = data
+		var rnode: Node3D = c["node"]
+		if c["mesh"] != null:
+			var old := c["mesh"] as MeshInstance3D
+			var was_visible := old.visible
+			old.queue_free()
+			c["mesh"] = null
+			if was_visible:
+				c["mesh"] = _make_mesh_node(data, rnode)
+		if c["body"] != null:
+			(c["body"] as Node).queue_free()
+			c["body"] = _make_body_node(data, rnode)
+		_sync_chunk(key, now)
+		return
+
+	if _chunks.has(key):
+		return
+	if now - float(_data_time.get(key, -1e9)) > unload_delay:
+		return                                          # you've moved on, this chunk isn't needed any more
+	var nnode := Node3D.new()
+	nnode.name = "Chunk_%d_%d" % [key.x, key.y]
+	nnode.position = Vector3(key.x * chunk_size, 0.0, key.y * chunk_size)
+	add_child(nnode)
+	_chunks[key] = { "node": nnode, "data": data, "mesh": null, "body": null }
+	_sync_chunk(key, now)
 
 
 # -------------------------
@@ -496,11 +620,11 @@ func _update_chunks() -> void:
 	_bg_queue.clear()
 	_mesh_queue.clear()
 	for key in needed.keys():
-		if not _chunks.has(key):
+		if not _chunks.has(key) and not _jobs.has(key):
 			_queue.append(key)
 	if pregenerate_behind:
 		for key in behind.keys():
-			if not _chunks.has(key) and not needed.has(key):
+			if not _chunks.has(key) and not _jobs.has(key) and not needed.has(key):
 				_bg_queue.append(key)
 	_sort_far_first(_queue, c)
 	_sort_far_first(_bg_queue, c)
@@ -514,6 +638,8 @@ func _update_chunks() -> void:
 	_regen_queue.clear()
 	if lod_enabled:
 		for key: Vector2i in _chunks.keys():
+			if _jobs.has(key):
+				continue
 			var data: Dictionary = (_chunks[key] as Dictionary)["data"]
 			var d: float = (key - c).length()
 			var want: int = _tier_at(d)
@@ -521,49 +647,6 @@ func _update_chunks() -> void:
 			if want < have or (want > have and _tier_at(d - 2.0) >= want):
 				_regen_queue.append(key)
 		_sort_far_first(_regen_queue, c)
-
-
-func _spawn_from_queue(budget: float) -> void:
-	while budget > 0.0 and _queue.size() > 0:
-		var key: Vector2i = _queue.pop_back()
-		if not _chunks.has(key):
-			_spawn(key)
-			budget -= _tier_cost(key)
-	# Only when nothing in view is waiting: build the ground behind you (one full chunk per frame, or several far ones).
-	if _queue.is_empty() and pregenerate_behind:
-		var bg_budget := 1.0
-		while bg_budget > 0.0 and _bg_queue.size() > 0:
-			var bg_key: Vector2i = _bg_queue.pop_back()
-			if not _chunks.has(bg_key):
-				_spawn(bg_key)
-				bg_budget -= _tier_cost(bg_key)
-
-
-## Re-builds chunks whose detail level changed as you moved, a few per frame, swapping the mesh and collision in place.
-func _regen_chunks(budget: int) -> void:
-	var now := Time.get_ticks_msec() / 1000.0
-	while budget > 0 and _regen_queue.size() > 0:
-		var key: Vector2i = _regen_queue.pop_back()
-		var c = _chunks.get(key)
-		if c == null:
-			continue
-		var want := _tier_at((key - _centre_chunk).length())
-		if int(c["data"]["tier"]) == want:
-			continue
-		c["data"] = _generate(key, want)
-		var node: Node3D = c["node"]
-		if c["mesh"] != null:
-			var old := c["mesh"] as MeshInstance3D
-			var was_visible := old.visible
-			old.queue_free()
-			c["mesh"] = null
-			if was_visible:
-				c["mesh"] = _make_mesh_node(c["data"], node)      # swapped straight away, so no hole appears
-		if c["body"] != null:
-			(c["body"] as Node).queue_free()
-			c["body"] = _make_body_node(c["data"], node)
-		_sync_chunk(key, now)
-		budget -= 1
 
 
 ## Makes or re-shows chunk meshes a few at a time, nearest first, so turning around never causes one big hitch.
@@ -579,6 +662,7 @@ func _build_meshes(budget: int) -> void:
 			budget -= 1
 
 
+## Builds a chunk straight away on the main thread. Only used at start-up, to fill the ground around you before frame 1.
 func _spawn(key: Vector2i, immediate := false) -> void:
 	var node := Node3D.new()
 	node.name = "Chunk_%d_%d" % [key.x, key.y]
