@@ -16,7 +16,12 @@ extends Node3D
 ##   frame and caused stutters while you ran. Now it is done on worker threads, and the main thread only turns finished
 ##   chunks into meshes and collision, a couple per frame.
 ##
-## Handy for your other scripts:  get_node("Terrain").height_at(x, z)  returns the ground height at any spot.
+## - NEW: floating objects. Solid objects in your scene (StaticBody3D, or anything in the group "terrain_attach") that are
+##   floating above the ground get ground built up underneath them, so the terrain rises up and meets the bottom of the object.
+##   It is found automatically when the game starts. Put a node in the group "no_terrain_attach" to leave it alone.
+##
+## Handy for your other scripts:  get_node("Terrain").height_at(x, z)  returns the ground height at any spot
+## (including the ground built up under floating objects).
 
 # -------------------------
 # WORLD
@@ -43,6 +48,16 @@ extends Node3D
 @export var mountain_radius := 260.0                   # how wide a typical mountain is, from its middle to its foot (metres)
 @export var mountain_spacing := 700.0                  # size of the grid of mountain slots (metres): bigger = mountains further apart
 @export var spawn_flat_radius := 40.0                  # ground around the world origin stays flat, so you never start inside a mountain
+
+# -------------------------
+# FLOATING OBJECTS - the ground rises up to meet them
+# -------------------------
+@export_group("Floating objects")
+@export var attach_floating_objects := true            # solid objects found floating above the ground get ground built up to their bottom
+@export var attach_min_gap := 0.15                     # ignore objects less than this far off the ground (they are just resting on it)
+@export var attach_max_gap := 40.0                     # ignore objects higher than this above the ground (clouds, the moon... things that SHOULD float)
+@export var attach_margin := 0.3                       # the raised ground reaches this far past the object's edge (metres)
+@export var attach_blend := 4.0                        # how far past that the raised ground slopes back down to the normal ground (metres)
 
 # -------------------------
 # COLOURS (painted into the terrain; multiplied with the grass texture if you add one)
@@ -106,6 +121,7 @@ var _n_mask: FastNoiseLite
 var _n_ridge: FastNoiseLite
 var _n_patch: FastNoiseLite
 var _mtn_cells := {}                                   # Vector2i -> Vector4(x, z, radius, height) for each mountain slot (height 0 = none)
+var _anchors := PackedFloat32Array()                    # NEW: raised ground under floating objects, 6 numbers each: centre x, z, half size x, z, bottom y, blend
 var _mtn_mutex := Mutex.new()                          # the mountain memory is used from several threads, so it is locked
 var _idx_mutex := Mutex.new()
 var _material: StandardMaterial3D
@@ -132,6 +148,10 @@ func _ready() -> void:
 	_seed = seed_value if seed_value != 0 else randi()
 	print("terrain_chunks: seed = ", _seed)
 	_setup_noise()
+	if attach_floating_objects:
+		var found := _scan_anchors()
+		if found > 0:
+			print("terrain_chunks: raised the ground under ", found, " floating object(s)")
 	_material = _make_material()
 	_tint_k = grass_color_strength if grass_texture != null else 1.0
 
@@ -201,9 +221,8 @@ func _setup_noise() -> void:
 	_mtn_cells.clear()
 
 
-## The ground height at any world position. Use this to place things on the ground, even in chunks that aren't loaded.
-## (Safe to call from any thread.)
-func height_at(x: float, z: float) -> float:
+## The natural (noise only) ground height, before any ground is raised under floating objects.
+func _natural_height(x: float, z: float) -> float:
 	var plains := 0.3 + 0.7 * smoothstep(-0.35, 0.45, _n_plains.get_noise_2d(x, z))   # flat regions and hilly regions
 	var h := _n_hills.get_noise_2d(x, z) * hill_height * plains
 	h += _n_detail.get_noise_2d(x, z) * detail_height
@@ -224,6 +243,129 @@ func height_at(x: float, z: float) -> float:
 					h += m.w * f * f * (0.88 + 0.24 * (_n_ridge.get_noise_2d(x, z) * 0.5 + 0.5))   # smooth rounded hill with a lumpy surface
 	var flat_w := smoothstep(spawn_flat_radius, spawn_flat_radius * 2.0, sqrt(x * x + z * z))
 	return h * flat_w
+
+
+## The ground height at any world position. Use this to place things on the ground, even in chunks that aren't loaded.
+## Includes the ground built up under floating objects. (Safe to call from any thread.)
+func height_at(x: float, z: float) -> float:
+	var h := _natural_height(x, z)
+	var a := _anchors                                   # the list is only ever replaced as a whole, so reading it from threads is safe
+	var i := 0
+	while i < a.size():
+		var bl := a[i + 5]
+		var dx := maxf(absf(x - a[i]) - a[i + 2], 0.0)
+		var dz := maxf(absf(z - a[i + 1]) - a[i + 3], 0.0)
+		if dx < bl and dz < bl:
+			var d := sqrt(dx * dx + dz * dz)
+			if d < bl:
+				var target := a[i + 4]
+				if h < target:
+					h = lerpf(h, target, 1.0 - smoothstep(0.0, bl, d))   # full height under the object, sloping back to the ground around it
+		i += 6
+	return h
+
+
+# -------------------------
+# FLOATING OBJECTS
+# -------------------------
+## Looks through the scene for solid objects that float above the ground and remembers where to raise the ground.
+## Returns how many it found. Called once at start-up (before any ground is built); call rescan_floating_objects() later
+## if you add or move objects while the game is running.
+func _scan_anchors() -> int:
+	var root := get_tree().current_scene
+	if root == null:
+		return 0
+	var out := PackedFloat32Array()
+	var count := 0
+	for n in root.find_children("*", "Node3D", true, false):
+		if not (n is StaticBody3D or n.is_in_group("terrain_attach")):
+			continue
+		if _attach_excluded(n):
+			continue
+		var box := _node_world_aabb(n)
+		if box.size.x < 0.3 or box.size.z < 0.3 or box.size.y > 300.0:
+			continue
+		var cx := box.position.x + box.size.x * 0.5
+		var cz := box.position.z + box.size.z * 0.5
+		var ex := box.size.x * 0.5 + attach_margin
+		var ez := box.size.z * 0.5 + attach_margin
+		var bottom := box.position.y
+		# The object is floating only if the ground is below its bottom everywhere under it (centre and corners).
+		var top_ground := _natural_height(cx, cz)
+		for sx in [-1.0, 1.0]:
+			for sz in [-1.0, 1.0]:
+				top_ground = maxf(top_ground, _natural_height(cx + sx * ex, cz + sz * ez))
+		var gap := bottom - top_ground
+		if gap < attach_min_gap or gap > attach_max_gap:
+			continue
+		out.append_array(PackedFloat32Array([cx, cz, ex, ez, bottom - 0.02, maxf(attach_blend, 0.1)]))   # a hair below the bottom so they overlap, no gap
+		count += 1
+	_anchors = out
+	return count
+
+
+func _attach_excluded(n: Node) -> bool:
+	var p := n
+	while p != null:
+		if p == self or p.is_in_group("player") or p.is_in_group("enemy") or p.is_in_group("no_terrain_attach"):
+			return true
+		p = p.get_parent()
+	return false
+
+
+## The world-space box around an object: its visible meshes if it has any, otherwise its collision shapes.
+func _node_world_aabb(n: Node) -> AABB:
+	var have := false
+	var box := AABB()
+	var list: Array = n.find_children("*", "GeometryInstance3D", true, false)
+	if n is GeometryInstance3D:
+		list.append(n)
+	for g in list:
+		if not (g is MeshInstance3D or g is CSGShape3D):
+			continue
+		var gi := g as GeometryInstance3D
+		if not gi.is_visible_in_tree():
+			continue
+		var b: AABB = gi.global_transform * gi.get_aabb()
+		if b.size.length() < 0.001:
+			continue
+		box = b if not have else box.merge(b)
+		have = true
+	if not have:
+		for c in n.find_children("*", "CollisionShape3D", true, false):
+			var cs := c as CollisionShape3D
+			if cs == null or cs.shape == null or cs.disabled:
+				continue
+			var dm := cs.shape.get_debug_mesh()
+			if dm == null:
+				continue
+			var b2: AABB = cs.global_transform * dm.get_aabb()
+			box = b2 if not have else box.merge(b2)
+			have = true
+	return box if have else AABB()
+
+
+## Call this after adding or moving floating objects while the game runs: it re-finds them and rebuilds the ground under them.
+func rescan_floating_objects() -> int:
+	var found := _scan_anchors()
+	var a := _anchors
+	var i := 0
+	while i < a.size():
+		var m := a[i + 5] + 1.0
+		_rebuild_rect(Rect2(a[i] - a[i + 2] - m, a[i + 1] - a[i + 3] - m, (a[i + 2] + m) * 2.0, (a[i + 3] + m) * 2.0))
+		i += 6
+	return found
+
+
+## Throws away the built chunks that overlap this world rectangle (x, z); the normal streaming rebuilds them straight away.
+func _rebuild_rect(r: Rect2) -> void:
+	for key in _chunks.keys():
+		if _jobs.has(key):
+			continue
+		var cr := Rect2((key.x - 0.5) * chunk_size, (key.y - 0.5) * chunk_size, chunk_size, chunk_size)
+		if cr.intersects(r):
+			((_chunks[key] as Dictionary)["node"] as Node).queue_free()
+			_chunks.erase(key)
 
 
 ## Each square slot of the world (mountain_spacing metres wide) may hold ONE mountain, decided by the seed alone,

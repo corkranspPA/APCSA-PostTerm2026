@@ -213,16 +213,29 @@ var restore_camera_pitch := false
 # BURROW (E) — NEW: sink into the ground, come out behind the nearest enemy (or ahead if none)
 # -------------------------
 @export var burrow_enabled := true
-@export var burrow_distance := 8.0          # how far ahead you come out when no enemy is near
-@export var burrow_enemy_range := 30.0      # nearest enemy within this range is the target
+@export var burrow_distance := 22.0         # CHANGED (was 8): how far ahead you come out when no enemy is near
+@export var burrow_aim_degrees := 22.0         # NEW: an enemy only counts if it is within this angle of where you are looking (and you can see it)
+@export var burrow_enemy_range := 60.0      # CHANGED (was 30): nearest enemy within this range is the target
 @export var burrow_behind_distance := 2.0   # how far behind the enemy you come out
-@export var burrow_sink_time := 0.3
-@export var burrow_rise_time := 0.3
+@export var burrow_sink_time := 0.42        # CHANGED: going in takes the same time as coming out (it is the exit played backwards)
+@export var burrow_rise_time := 0.42        # CHANGED: the backflip out of the ground takes this long (before burrow_time_scale)
 @export var burrow_depth := 2.2             # how far down you sink (deeper than the camera height so the screen goes under)
 @export var burrow_cooldown := 3.0
-@export var burrow_pop_velocity := 5.0
-@export var burrow_travel_time := 0.3       # NEW: how long the shadow streak takes to race to the exit spot
+@export var burrow_pop_velocity := 0.0      # CHANGED (was 5): the flip arc already does the hop
+@export var burrow_time_scale := 1.8        # NEW: slows the WHOLE burrow animation (1.0 = old speed, 2.0 = twice as slow)
+@export var burrow_preroll_degrees := 60.0  # NEW: the flip starts winding up underground, so you break the surface already mid-flip (and the spin never starts with a jolt)
+@export var burrow_dive_degrees := 55.0     # NEW: how far you tip forward, face first, as you go in
+@export var burrow_launch_frac := 0.2       # NEW: how early in the exit you leave the ground (0.2 = 20% in). Smaller = harder launch and a higher flip
+@export var burrow_travel_time := 0.12      # NEW: how long the shadow streak takes to race to the exit spot
 @export var burrow_stealth_time := 1.5      # NEW: enemies can't see or hear you for this long after you come out
+@export var burrow_camera_hold := 0.35      # NEW: how high above the found ground the camera stops while you dive (raise it if your head still clips into the ground)
+@export var burrow_shadow_lift := 0.03       # CHANGED (was 0.3): the shadow floats just this far above the ground height that is found under you
+@export var burrow_wall_fly_distance := 7.0   # NEW: how far you fly out from the wall's far face before landing
+@export var burrow_wall_exit_speed := 5.0     # NEW: forward speed you keep when you land, so you carry on moving away from the wall
+@export var burrow_wall_arc := 1.4            # NEW: how high the flight arcs out of the wall
+@export var burrow_wall_max_thickness := 40.0 # NEW: the thickest wall / hill you can go through
+@export var burrow_look_range := 45.0         # NEW: how far away the spot you look at can be (the portal opens where your view hits the ground / a wall)
+@export var burrow_wall_reach := 1.3         # NEW: how close you must be to a wall (and facing it) for E to go through it
 @export var burrow_shadow_enabled := true   # NEW: dark pools, wisps and a shadow streak
 
 var is_burrowing := false
@@ -233,8 +246,27 @@ var burrow_start := Vector3.ZERO
 var burrow_exit := Vector3.ZERO
 var burrow_look = null                      # world position to face when you come out (null = keep facing)
 var burrow_yaw := 0.0
+var burrow_cam_lift := 0.0                  # NEW: keeps the camera from sinking below the ground surface while you burrow
+var burrow_wall_exit := false               # NEW: this burrow flies out of a wall instead of rising out of the ground
+var burrow_wall_face := Vector3.ZERO        # NEW: where the far face of the wall is (the point you fly out from)
+var burrow_wall_dir := Vector3.ZERO         # NEW: the direction you fly out (straight through the wall)
+var burrow_wall_portal := Vector3.ZERO      # NEW: the exact spot on the wall you looked at (centre of the wall portal)
+var burrow_wall_y0 := 0.0                  # NEW: height you burst out of the wall at
+var burrow_wall_fly := 0.0                  # NEW: horizontal distance from the wall face to where you land
+var burrow_travel_to := Vector3.ZERO        # NEW: where the underground travel ends (under the far face for a wall)
+var burrow_front_flip := false              # NEW: true when you are coming out of a wall (front flip instead of backflip)
+var burrow_crossed := false                 # NEW: true once you have gone through the ground surface on the way in
+var shadow_cover_target := 0.0              # NEW: where the black screen wants to be; the real value eases toward it
+var shadow_cover_cur := 0.0
+var _void_env: Environment = null            # NEW: solid-black camera environment used while the screen is (nearly) black
+var _saved_cam_env: Environment = null
+var shadow_cover_rect: ColorRect = null     # NEW: full-screen black "shadow passing over your eyes" overlay
 var stealth_timer := 0.0                    # NEW: while > 0, enemies can't notice you (enemy.gd reads this)
 var _shadow_shader: Shader = null
+var _shadow_shader_top: Shader = null       # NEW: same shader but drawn over the terrain (never hidden by a bump)
+var _saved_cam_near := -1.0                # NEW: the camera's real near plane, put back after the burrow
+var _terrain_node: Node = null              # NEW: your terrain script (found by its height_at method), used for the exact ground height
+var burrow_surface_y := 0.0                 # NEW: the real ground height found under you; the shadow sits on it and the camera stops on it
 var _shadow_streak: MeshInstance3D = null
 var _shadow_streak_mat: ShaderMaterial = null
 var _shadow_trail: CPUParticles3D = null
@@ -257,13 +289,23 @@ var is_slamming := false
 @export var slide_duration := 1.0
 @export var slide_friction := 4.5
 @export var slide_burst := 1.6
-@export var slope_slide_boost := 2.2
+@export var slope_slide_boost := 2.2          # (no longer used: gravity does this now, see slide_gravity_mult)
+@export var slide_gravity_mult := 0.0         # NEW: extra gravity pull down a slope (0 = none: speed is only kept, not added. Raise it to speed up downhill)
+@export var slide_slope_friction_mult := 0.15 # NEW: friction left on a slope (0 = none). This is what lets a slide keep going down a hill
+@export var slide_downhill_steer := 14.0       # NEW: how quickly a slide on a slope swings round to head straight DOWN the hill (not sideways across it)
+@export var slide_max_speed := 40.0           # NEW: top speed a slide can reach going downhill
+@export var slide_snap_length := 1.5          # NEW: how firmly you stick to the ground while sliding fast downhill (stops you launching off every bump)
+@export var slide_floor_angle := 65.0         # NEW: steepest ground (degrees) a slide still counts as ground and not a wall
+@export var slide_keep_going_slope := 0.12    # NEW: slope (sine of the angle, 0.12 = about 7 degrees) above which a slide never runs out: it just keeps going downhill
 @export var slide_from_walk := true          # crouch while moving fast enough slides even if not sprinting
 
 var is_sliding := false
 var slide_timer := 0.0
 var slide_direction := Vector3.ZERO
 var slide_speed := 0.0
+var slide_air_time := 0.0
+var _base_floor_snap := 0.1
+var _base_floor_angle := 0.785398
 
 # -------------------------
 # KNOCKBACK (from enemy hits)
@@ -424,6 +466,8 @@ func _ready() -> void:
 	base_camera_pos = camera.position
 	base_camera_rot_x = camera.rotation.x
 	head_base_pos = head.position
+	_base_floor_snap = floor_snap_length
+	_base_floor_angle = floor_max_angle
 
 	stamina = max_stamina
 	health = max_health
@@ -451,6 +495,7 @@ func _ready() -> void:
 		InputMap.action_add_event("burrow", ev)
 
 	_build_damage_flash()
+	_build_shadow_cover()
 	_build_player_shadow()
 
 
@@ -486,11 +531,12 @@ func _input(event: InputEvent) -> void:
 ## Head so the camera turns on the spot at eye level instead (the camera itself never moves).
 func _update_head_pivot() -> void:
 	var c := camera.position
-	head.position = head_base_pos + c - head.transform.basis * c
+	head.position = head_base_pos + c - head.transform.basis * c + Vector3(0.0, burrow_cam_lift, 0.0)
 
 
 func _process(delta: float) -> void:
 	_update_head_pivot()
+	_update_shadow_cover(delta)
 	_update_player_shadow()
 	_update_weapon_clip(delta)
 
@@ -527,8 +573,6 @@ func _process(delta: float) -> void:
 		if is_rolling:
 			# air rolls use a much lighter vignette than ground rolls
 			target_squint += air_roll_vignette_boost if roll_is_air else roll_vignette_boost
-		if is_burrowing:
-			target_squint = 1.0   # NEW: screen closes in while you're underground
 		target_squint = clampf(target_squint, 0.0, 1.0)
 
 		current_squint = lerp(current_squint, target_squint, squint_smoothing * delta)
@@ -553,6 +597,9 @@ func _physics_process(delta: float) -> void:
 
 	dash_cooldown_timer = max(dash_cooldown_timer - delta, 0.0)
 	burrow_cooldown_timer = max(burrow_cooldown_timer - delta, 0.0)   # NEW
+	# While sliding, stick to the ground firmly and treat steeper ground as floor, so a fast slide can follow a mountainside.
+	floor_snap_length = slide_snap_length if is_sliding else _base_floor_snap
+	floor_max_angle = deg_to_rad(slide_floor_angle) if is_sliding else _base_floor_angle
 	stealth_timer = max(stealth_timer - delta, 0.0)
 	knockback_timer = max(knockback_timer - delta, 0.0)
 
@@ -749,23 +796,61 @@ func _physics_process(delta: float) -> void:
 	else:
 
 		if is_sliding:
-			slide_timer -= delta
-
-			var slope_factor := 1.0
+			# GRAVITY-BASED SLIDE: gravity pulls you down the slope, friction fades away on slopes, so on a hill or a
+			# mountainside the slide speeds up and keeps going. It only runs out on flat or gently sloped ground.
+			var steep := 0.0                       # sine of the slope angle: 0 = flat ... 1 = a vertical wall
+			var v := velocity                      # the real velocity after last frame's movement (so walls and bumps slow you down)
 			if is_on_floor():
-				var n = get_floor_normal()
-				var slope = rad_to_deg(acos(n.dot(Vector3.UP)))
-				if slope > 5.0:
-					slope_factor = 1.0 + (slope / 45.0) * slope_slide_boost
+				slide_air_time = 0.0
+				var n := get_floor_normal()
+				var pull := Vector3.DOWN.slide(n)  # points straight downhill; its length is the sine of the slope angle
+				steep = pull.length()
+				# The slide keeps its OWN speed instead of trusting the velocity Godot hands back (move_and_slide trims it on
+				# slopes, which is what was killing the momentum). Only a real collision (much slower than intended) lowers it.
+				var real_sp := v.length()
+				var base_sp := slide_speed
+				if real_sp < slide_speed * 0.5:
+					base_sp = real_sp
+				var dir0 := v.slide(n)
+				if dir0.length() < 0.01:
+					dir0 = slide_direction.slide(n)
+				dir0 = dir0.normalized()
+				v = dir0 * base_sp
+				v += pull * absf(get_gravity().y) * slide_gravity_mult * delta
+				var fr := slide_friction * lerpf(1.0, slide_slope_friction_mult, clampf(steep * 6.0, 0.0, 1.0))
+				var sp := minf(maxf(v.length() - fr * delta, 0.0), slide_max_speed)
+				v = v.slide(n)                     # keep the motion along the ground
+				if v.length() > 0.01:
+					# On a slope the slide is steered round to head straight down the hill, so it never just drifts sideways across it.
+					var cur := v.normalized()
+					if steep > 0.01:
+						var down_dir := pull.normalized()
+						cur = cur.lerp(down_dir, clampf(slide_downhill_steer * clampf(steep * 10.0, 0.0, 1.0) * delta, 0.0, 1.0))
+						if cur.length() < 0.01:
+							cur = down_dir
+						cur = cur.normalized().slide(n).normalized()
+					v = cur * sp
+				else:
+					v = Vector3.ZERO
+				velocity = v
+			else:
+				# In the air gravity (applied above) carries you; land and the slide carries on.
+				slide_air_time += delta
+				if slide_air_time > 1.0:
+					stop_slide()
 
-			slide_speed -= slide_friction * delta
-			slide_speed = max(slide_speed, 0.0)
+			if is_sliding:
+				slide_speed = velocity.length()
+				var hv := Vector2(velocity.x, velocity.z)
+				if hv.length() > 0.5:
+					slide_direction = Vector3(hv.x, 0.0, hv.y).normalized()
 
-			velocity.x = slide_direction.x * slide_speed * slope_factor
-			velocity.z = slide_direction.z * slide_speed * slope_factor
-
-			if slide_timer <= 0.0 or slide_speed < 2.0:
-				stop_slide()
+				var on_slope := steep >= slide_keep_going_slope
+				# The timer only runs down on flat / gentle ground, so a slide down a mountain never times out.
+				slide_timer -= delta * (1.0 - clampf(steep * 6.0, 0.0, 1.0))
+				# On a hill the slide only ends when its speed runs out (or you stop it); on flat ground the timer ends it too.
+				if slide_speed < 2.0 or (not on_slope and slide_timer <= 0.0):
+					stop_slide()
 
 		else:
 			var current_speed = speed
@@ -952,12 +1037,29 @@ func _physics_process(delta: float) -> void:
 # BURROW (E) — NEW
 # -------------------------
 func _start_burrow() -> void:
+	# Up against a wall (and facing it): shadow travel goes THROUGH the wall and comes out the far side with a front flip.
+	# The portal opens where you are LOOKING on the collision (ground or wall); the shadow never passes through walls.
 	var exit := _burrow_pick_exit()
 	if exit.is_empty():
 		return   # nowhere clear to come out: nothing happens, no cooldown spent
+	burrow_front_flip = exit.get("front", false)
 	burrow_exit = exit["pos"]
+	burrow_exit.y = maxf(burrow_exit.y, _terrain_height(burrow_exit.x, burrow_exit.z, burrow_exit.y))
 	burrow_look = exit["look"]
 	burrow_start = global_position
+	burrow_surface_y = _burrow_surface_height()
+	burrow_wall_exit = exit.get("wall", false)
+	burrow_travel_to = burrow_exit
+	if burrow_wall_exit:
+		burrow_wall_face = exit["face"]
+		burrow_wall_dir = exit["dir"]
+		burrow_wall_y0 = exit["y0"]
+		burrow_wall_portal = exit.get("portal", burrow_wall_face + Vector3.UP)
+		burrow_wall_fly = Vector2(burrow_exit.x - burrow_wall_face.x, burrow_exit.z - burrow_wall_face.z).length()
+		var emb: Vector3 = burrow_wall_face - burrow_wall_dir * 2.0     # just inside the wall behind its far face
+		burrow_travel_to = Vector3(emb.x, _terrain_height(emb.x, emb.z, burrow_start.y), emb.z)
+	_saved_cam_near = camera.near
+	camera.near = 0.02   # so the ground right in front of your face is never clipped away (restored when you come out)
 
 	# Which way to face when you come out (toward the enemy, or the way you were already facing).
 	burrow_yaw = rotation.y
@@ -966,6 +1068,8 @@ func _start_burrow() -> void:
 		dir.y = 0.0
 		if dir.length() > 0.1:
 			burrow_yaw = atan2(-dir.x, -dir.z)
+	if exit.has("yaw"):
+		burrow_yaw = exit["yaw"]
 
 	is_dashing = false
 	is_rolling = false
@@ -980,10 +1084,11 @@ func _start_burrow() -> void:
 	burrow_phase = 1
 	burrow_timer = burrow_sink_time
 	stealth_timer = burrow_stealth_time
+	burrow_crossed = false
 
-	# Shadow effect: a dark pool opens under your feet and wisps of shadow curl up as you sink into it.
+	# Shadow effect: a dark pool opens under your feet while you leap, and you dive into it.
 	if burrow_shadow_enabled:
-		_spawn_shadow_pool(burrow_start + Vector3.UP * 0.1, 0.25, 1.3, burrow_sink_time, 0.15, 0.5)
+		_spawn_shadow_pool(Vector3(burrow_start.x, burrow_surface_y + burrow_shadow_lift, burrow_start.z), 0.25, 1.3, burrow_sink_time * burrow_time_scale, 0.15, 0.5, get_floor_normal())
 		_spawn_shadow_burst(burrow_start, 22)
 	burrow_started.emit()
 
@@ -993,14 +1098,23 @@ func _burrow_physics(delta: float) -> void:
 	velocity = Vector3.ZERO
 	invuln_timer = maxf(invuln_timer, 0.2)       # can't be hurt while underground
 	stealth_timer = burrow_stealth_time          # enemies can't see or hear you while you're gone
-	burrow_timer -= delta
+	burrow_timer -= delta / maxf(burrow_time_scale, 0.1)   # bigger time_scale = slower animation
 
 	if burrow_phase == 1:
-		# Sinking: ease down into the ground while the view squeezes in.
+		# Sinking: fall face first into the ground (no hop, no flip).
 		var t := 1.0 - clampf(burrow_timer / maxf(burrow_sink_time, 0.01), 0.0, 1.0)
 		global_position = burrow_start + Vector3.DOWN * burrow_depth * (t * t)
+		camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees) * pow(t, 1.5)
 		_burrow_fov(normal_fov - 14.0, delta)
+		_pin_camera_to_surface(burrow_surface_y)             # the camera stops here, on the shadow at the found ground height
+		var touch_cover := _eye_cover(burrow_surface_y, burrow_camera_hold + 0.11, burrow_camera_hold + 0.01)
+		_set_shadow_cover(touch_cover, touch_cover >= 0.99)   # black the instant the camera touches the surface (no easing)
+		if not burrow_crossed and t * t * burrow_depth > 0.3:
+			# You've gone down through the surface: the gun disappears.
+			burrow_crossed = true
+			_set_weapon_visible(false)
 		if burrow_timer <= 0.0:
+			_set_weapon_visible(false)
 			burrow_phase = 2
 			burrow_timer = maxf(burrow_travel_time, 0.01)
 			_begin_shadow_travel()
@@ -1008,40 +1122,166 @@ func _burrow_physics(delta: float) -> void:
 		# Racing underground as a shadow: a dark streak zips across the ground to the exit spot.
 		var t2 := 1.0 - clampf(burrow_timer / maxf(burrow_travel_time, 0.01), 0.0, 1.0)
 		var te := t2 * t2 * (3.0 - 2.0 * t2)
-		var along := burrow_start.lerp(burrow_exit, te)
+		var along := burrow_start.lerp(burrow_travel_to, te)
 		global_position = along + Vector3.DOWN * burrow_depth
+		_pin_camera_to_surface(lerpf(burrow_surface_y, burrow_travel_to.y, te))
 		rotation.y = lerp_angle(rotation.y, burrow_yaw, 1.0 - exp(-14.0 * delta))
 		_burrow_fov(normal_fov + 26.0, delta)
+		# Stay tipped forward, then start winding the flip up gently (it speeds up from standing still, so the exit has no jolt).
+		if burrow_wall_exit:
+			# Leaving a wall HEAD FIRST: level out from the dive so you shoot out of the wall head-first, looking where you're flying.
+			camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees) * (1.0 - smoothstep(0.0, 0.8, t2))
+		elif burrow_front_flip:
+			camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees)   # keeps tipping forward: the front flip carries straight on from the dive
+		else:
+			camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees) + deg_to_rad(burrow_preroll_degrees) * smoothstep(0.45, 1.0, t2)
+		_set_shadow_cover(1.0)   # completely black while travelling
 		_update_shadow_travel(along)
 		if burrow_timer <= 0.0:
-			global_position = burrow_exit + Vector3.DOWN * burrow_depth
 			rotation.y = burrow_yaw
 			_end_shadow_travel()
-			if burrow_shadow_enabled:
-				_spawn_shadow_pool(burrow_exit + Vector3.UP * 0.1, 0.4, 1.4, 0.2, 0.15, 0.6)
-				_spawn_shadow_burst(burrow_exit, 34)
+			if burrow_wall_exit:
+				# Now inside the wall, right behind its far face, at the height you burst out at.
+				var emb2: Vector3 = burrow_wall_face - burrow_wall_dir * 2.0
+				global_position = Vector3(emb2.x, burrow_wall_y0, emb2.z)
+				if burrow_shadow_enabled:
+					_spawn_shadow_pool(burrow_wall_portal + burrow_wall_dir * 0.06, 0.3, 1.9, 0.3, 0.45, 0.6, burrow_wall_dir)   # a big upright portal opens on the wall face where you looked
+					_spawn_shadow_pool(burrow_wall_portal + burrow_wall_dir * 0.1, 0.2, 1.1, 0.25, 0.4, 0.6, burrow_wall_dir)
+					_spawn_shadow_burst(burrow_wall_portal + burrow_wall_dir * 0.3 - Vector3.UP * 0.5, 45)
+			else:
+				global_position = burrow_exit + Vector3.DOWN * burrow_depth
+				if burrow_shadow_enabled:
+					_spawn_shadow_pool(burrow_exit + Vector3.UP * burrow_shadow_lift, 0.4, 1.4, 0.2, 0.15, 0.6)
+					_spawn_shadow_burst(burrow_exit, 34)
 			burrow_phase = 3
 			burrow_timer = burrow_rise_time
 	else:
 		# Rising: come up out of the ground as the view snaps back to normal.
 		var t3 := 1.0 - clampf(burrow_timer / maxf(burrow_rise_time, 0.01), 0.0, 1.0)
-		var eased := 1.0 - (1.0 - t3) * (1.0 - t3)
-		global_position = burrow_exit + Vector3.DOWN * burrow_depth * (1.0 - eased)
-		_burrow_fov(normal_fov, delta)
+		# One smooth launch arc: starts underground, shoots out of the ground early, peaks, then comes down to the exit spot.
+		# The time is eased (smoothstep) so you accelerate up out of the ground instead of being fired from a standstill,
+		# and you settle onto the exit spot instead of thumping down.
+		var wall_cover := 1.0
+		if burrow_wall_exit:
+			# FLY OUT OF THE WALL: burst out of the wall's far face (fast at first, then slowing), arc through the air
+			# and land on the ground beyond it.
+			var ew := 1.0 - (1.0 - t3) * (1.0 - t3)
+			var along_d := lerpf(-2.0, burrow_wall_fly, ew)                      # distance past the wall face (negative = still inside the wall)
+			var hp: Vector3 = burrow_wall_face + burrow_wall_dir * along_d
+			var yy := lerpf(burrow_wall_y0, burrow_exit.y, t3 * t3) + burrow_wall_arc * sin(PI * t3)
+			global_position = Vector3(hp.x, yy, hp.z)
+			_pin_camera_to_surface(burrow_exit.y)
+			wall_cover = 1.0 - smoothstep(0.1, 0.7, along_d)                      # vision returns as your eyes come out of the wall
+			if along_d >= 0.0:
+				_set_weapon_visible(true)
+		else:
+			var w := smoothstep(0.0, 1.0, t3)
+			var c := burrow_depth / clampf(burrow_launch_frac, 0.05, 0.6)
+			var h := -burrow_depth + (c + burrow_depth) * w - c * w * w
+			global_position = burrow_exit + Vector3.UP * h
+			_pin_camera_to_surface(burrow_exit.y)
+			if h >= 0.0:
+				_set_weapon_visible(true)   # you're out of the ground: the gun reappears
+		# The flip carries on from the dive and is fastest at the start (ease-out), so you're already
+		# well over (looking up) by the time you break out of the ground, and finish level at the top of the arc.
+		var spin := smoothstep(0.0, 1.0, pow(t3, 0.7))
+		var start_ang := -deg_to_rad(burrow_dive_degrees) + deg_to_rad(burrow_preroll_degrees)
+		var end_ang := TAU
+		if burrow_front_flip:
+			start_ang = -deg_to_rad(burrow_dive_degrees)   # a FRONT flip: keep rotating forward the same way the dive tipped you
+			if burrow_wall_exit:
+				start_ang = 0.0                        # out of a wall you leave head first (level), then tumble forward
+			end_ang = -TAU
+		camera.rotation.x = base_camera_rot_x + lerpf(start_ang, end_ang, spin)
+		_burrow_fov(normal_fov + 12.0 * sin(PI * t3), delta, 6.0)
+		if burrow_wall_exit:
+			_set_shadow_cover(wall_cover)
+		else:
+			_set_shadow_cover(_eye_cover(burrow_exit.y, 0.4 + (burrow_camera_hold - 0.05), 0.1 + (burrow_camera_hold - 0.05)))   # vision comes back as soon as your eyes are out of the ground
 		if burrow_timer <= 0.0:
+			camera.rotation.x = base_camera_rot_x
+			camera.rotation.z = 0.0
+			_set_weapon_visible(true)
+			_restore_camera_near()
+			burrow_cam_lift = 0.0
+			_update_head_pivot()
+			_set_shadow_cover(0.0, true)
 			global_position = burrow_exit + Vector3.UP * 0.05
 			is_burrowing = false
 			burrow_phase = 0
 			burrow_cooldown_timer = burrow_cooldown
 			velocity = Vector3(0.0, burrow_pop_velocity, 0.0)
+			if burrow_wall_exit:
+				velocity += burrow_wall_dir * burrow_wall_exit_speed   # keep moving away from the wall
 			invuln_timer = maxf(invuln_timer, 0.4)
 			stealth_timer = burrow_stealth_time   # enemies stay blind to you for a moment after you pop out
 			was_on_floor = true   # so coming out doesn't count as a bunny-hop landing
 			burrow_finished.emit()
 
 
-func _burrow_fov(target: float, delta: float) -> void:
-	current_fov = lerpf(current_fov, target, 1.0 - exp(-12.0 * delta))
+## Holds the camera at the ground surface (just above it) while the rest of you sinks below it. The camera never goes under
+## the ground, so it stops at the portal, and the world beneath can never be seen.
+func _pin_camera_to_surface(ground_y: float) -> void:
+	var unlifted := global_position.y + head_base_pos.y + camera.position.y   # where the eyes would be without the pin
+	burrow_cam_lift = maxf(0.0, ground_y + burrow_camera_hold - unlifted)
+	_update_head_pivot()
+
+
+## The exact ground height at a spot, straight from your terrain script's height_at(x, z) (the same function that builds the
+## visible ground and its collision). Falls back to `fallback` if no terrain node is found.
+func _terrain_height(x: float, z: float, fallback: float) -> float:
+	if _terrain_node == null or not is_instance_valid(_terrain_node):
+		_terrain_node = null
+		var root := get_tree().current_scene
+		if root != null:
+			for n in root.find_children("*", "Node3D", true, false):
+				if n.has_method("height_at"):
+					_terrain_node = n
+					break
+	if _terrain_node != null:
+		return float(_terrain_node.call("height_at", x, z))
+	return fallback
+
+
+## Finds the real surface under you with a ray (not just where your feet are), ignoring enemies and anything overhead.
+## The shadow is placed on this height and the camera stops at it, so the two always agree.
+func _burrow_surface_height() -> float:
+	var space := get_world_3d().direct_space_state
+	var best := global_position.y
+	var ex: Array[RID] = [get_rid()]
+	for i in 5:
+		var q := PhysicsRayQueryParameters3D.create(global_position + Vector3.UP * 2.5, global_position + Vector3.DOWN * 4.0)
+		q.exclude = ex
+		q.collision_mask = weapon_clip_mask
+		var r := space.intersect_ray(q)
+		if r.is_empty():
+			break
+		var col = r.collider
+		var skip: bool = (col is Node and (col as Node).is_in_group("enemy")) or (r.position as Vector3).y > global_position.y + 1.0
+		if skip:
+			ex.append(r.rid)
+			continue
+		best = maxf(best, (r.position as Vector3).y)
+		break
+	# The terrain script knows the exact ground height (the same numbers that build the visible ground).
+	best = maxf(best, _terrain_height(global_position.x, global_position.z, best))
+	return best
+
+
+func _restore_camera_near() -> void:
+	if camera != null and _saved_cam_near > 0.0:
+		camera.near = _saved_cam_near
+	_saved_cam_near = -1.0   # only restore once per burrow, so a death outside a burrow never touches the camera
+
+
+func _set_weapon_visible(v: bool) -> void:
+	var w := Weapon as Node3D
+	if w != null and is_instance_valid(w):
+		w.visible = v
+
+
+func _burrow_fov(target: float, delta: float, rate: float = 8.0) -> void:
+	current_fov = lerpf(current_fov, target, 1.0 - exp(-rate * delta))
 	camera.fov = current_fov
 
 
@@ -1050,10 +1290,8 @@ func _burrow_fov(target: float, delta: float) -> void:
 # -------------------------
 
 ## The dark, swirling pool material used for the sink pool, the exit pool and the travelling streak.
-func _make_shadow_material() -> ShaderMaterial:
-	if _shadow_shader == null:
-		_shadow_shader = Shader.new()
-		_shadow_shader.code = """
+func _make_shadow_material(on_top: bool = false) -> ShaderMaterial:
+	var code := """
 shader_type spatial;
 render_mode unshaded, blend_mix, depth_draw_never, cull_disabled, shadows_disabled;
 uniform float fade = 1.0;
@@ -1062,25 +1300,36 @@ uniform vec4 rim_color : source_color = vec4(0.5, 0.12, 1.0, 1.0);
 void fragment() {
 	vec2 p = UV * 2.0 - 1.0;
 	float r = length(p);
-	float body = smoothstep(1.0, 0.5, r);
+	float body = 1.0 - smoothstep(0.5, 1.0, r);
 	float ang = atan(p.y, p.x) + r * 3.5 - TIME * 7.0;
 	float swirl = 0.5 + 0.5 * sin(ang * 3.0);
 	float rings = 0.5 + 0.5 * sin(r * 24.0 - TIME * 14.0);
-	float rim = smoothstep(0.45, 0.85, r) * smoothstep(1.0, 0.8, r);
+	float rim = smoothstep(0.45, 0.85, r) * (1.0 - smoothstep(0.8, 1.0, r));
 	vec3 col = mix(shade_color.rgb, rim_color.rgb, rim * (0.35 + 0.65 * rings));
-	ALBEDO = col;
-	ALPHA = body * (0.7 + 0.3 * swirl) * fade * 0.95;
+	ALBEDO = clamp(col, vec3(0.0), vec3(0.7));
+	ALPHA = clamp(body * (0.7 + 0.3 * swirl) * fade * 0.95, 0.0, 1.0);
 }
 """
+	var sh: Shader
+	if on_top:
+		if _shadow_shader_top == null:
+			_shadow_shader_top = Shader.new()
+			_shadow_shader_top.code = code.replace("depth_draw_never,", "depth_draw_never, depth_test_disabled,")
+		sh = _shadow_shader_top
+	else:
+		if _shadow_shader == null:
+			_shadow_shader = Shader.new()
+			_shadow_shader.code = code
+		sh = _shadow_shader
 	var mat := ShaderMaterial.new()
-	mat.shader = _shadow_shader
+	mat.shader = sh
 	mat.set_shader_parameter("fade", 1.0)
 	return mat
 
 
 ## A dark pool on the ground that opens up, holds for a moment, then fades away.
-func _spawn_shadow_pool(pos: Vector3, s0: float, s1: float, grow_time: float, hold: float, fade_time: float) -> void:
-	var mat := _make_shadow_material()
+func _spawn_shadow_pool(pos: Vector3, s0: float, s1: float, grow_time: float, hold: float, fade_time: float, normal: Vector3 = Vector3.UP) -> void:
+	var mat := _make_shadow_material(true)   # drawn on top of the terrain so a bump or grass can never bury it
 	var mi := MeshInstance3D.new()
 	var pm := PlaneMesh.new()
 	pm.size = Vector2(2.6, 2.6)
@@ -1089,6 +1338,8 @@ func _spawn_shadow_pool(pos: Vector3, s0: float, s1: float, grow_time: float, ho
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	get_tree().current_scene.add_child(mi)
 	mi.global_position = pos
+	if normal.length() > 0.5 and normal.dot(Vector3.UP) < 0.999:
+		mi.quaternion = Quaternion(Vector3.UP, normal.normalized())   # lie flat against a slope instead of cutting into it
 	mi.scale = Vector3(s0, 1.0, s0)
 
 	var tw := create_tween()
@@ -1125,14 +1376,14 @@ func _make_shadow_particles(amount: int, lifetime: float, v_min: float, v_max: f
 	p.scale_amount_curve = curve
 
 	var grad := Gradient.new()
-	grad.set_color(0, Color(0.55, 0.15, 1.0, 0.9))
+	grad.set_color(0, Color(0.35, 0.1, 0.65, 0.8))
 	grad.set_color(1, Color(0.02, 0.0, 0.05, 0.0))
 	grad.add_point(0.3, Color(0.06, 0.0, 0.12, 0.85))
 	p.color_ramp = grad
 
 	var sm := SphereMesh.new()
-	sm.radius = 0.14
-	sm.height = 0.28
+	sm.radius = 0.1
+	sm.height = 0.2
 	sm.radial_segments = 8
 	sm.rings = 4
 	var pmat := StandardMaterial3D.new()
@@ -1185,9 +1436,9 @@ func _update_shadow_travel(along: Vector3) -> void:
 	var gp: Vector3 = along
 	if g != null:
 		gp = g
-	_shadow_streak.global_position = gp + Vector3.UP * 0.1
+	_shadow_streak.global_position = gp + Vector3.UP * burrow_shadow_lift
 	if _shadow_trail != null and is_instance_valid(_shadow_trail):
-		_shadow_trail.global_position = gp + Vector3.UP * 0.2
+		_shadow_trail.global_position = gp + Vector3.UP * (burrow_shadow_lift + 0.1)
 
 
 func _end_shadow_travel() -> void:
@@ -1205,17 +1456,180 @@ func _end_shadow_travel() -> void:
 	_shadow_trail = null
 
 
-## Picks where to come out: behind the nearest living enemy, otherwise straight ahead.
+## True if nothing solid (other than that enemy) is between the camera and the enemy's chest.
+func _burrow_can_see(en: Node3D, from: Vector3) -> bool:
+	var space := get_world_3d().direct_space_state
+	var to: Vector3 = en.global_position + Vector3.UP * 1.0
+	var ex: Array[RID] = [get_rid()]
+	for i in 4:
+		var q := PhysicsRayQueryParameters3D.create(from, to)
+		q.exclude = ex
+		q.collision_mask = weapon_clip_mask
+		var r := space.intersect_ray(q)
+		if r.is_empty():
+			return true
+		var col = r.collider
+		if col == en or (col is Node and (col as Node).is_in_group("enemy")):
+			return true
+		return false
+	return true
+
+
+## The horizontal direction INTO the wall you are up against and facing (zero if there is none).
+func _burrow_wall_direction() -> Vector3:
+	var fwd := -global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length() < 0.1:
+		return Vector3.ZERO
+	fwd = fwd.normalized()
+	var space := get_world_3d().direct_space_state
+	for h: float in [0.5, 1.2]:                       # knee height and chest height
+		var from: Vector3 = global_position + Vector3.UP * h
+		var q := PhysicsRayQueryParameters3D.create(from, from + fwd * burrow_wall_reach)
+		q.exclude = [get_rid()]
+		q.collision_mask = weapon_clip_mask
+		var r := space.intersect_ray(q)
+		if r.is_empty():
+			continue
+		var col = r.collider
+		if col is Node and (col as Node).is_in_group("enemy"):
+			continue
+		var n: Vector3 = r.normal
+		if absf(n.y) > 0.5:
+			continue                                   # a floor or gentle slope, not a wall
+		n.y = 0.0
+		if n.length() > 0.1:
+			return -n.normalized()
+	if is_on_wall():
+		var wn := get_wall_normal()
+		wn.y = 0.0
+		if wn.length() > 0.1 and fwd.dot(-wn.normalized()) > 0.3:
+			return -wn.normalized()
+	return Vector3.ZERO
+
+
+## True if nothing solid (other than an enemy) overlaps a small ball at this point.
+func _burrow_point_is_free(p: Vector3) -> bool:
+	var shape := SphereShape3D.new()
+	shape.radius = 0.3
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = shape
+	q.transform = Transform3D(Basis(), p)
+	q.collision_mask = weapon_clip_mask
+	q.exclude = [get_rid()]
+	for h in get_world_3d().direct_space_state.intersect_shape(q, 4):
+		var c = h.collider
+		if c == null or (c is Node and (c as Node).is_in_group("enemy")):
+			continue
+		return false
+	return true
+
+
+## Works out where you burst out of the wall: walks straight through it (from the face you're touching) until it finds
+## open space, which is the wall's far face, then picks a spot on the ground beyond it to land on.
+func _burrow_pick_wall_exit(d: Vector3) -> Dictionary:
+	var space := get_world_3d().direct_space_state
+	var origin: Vector3 = global_position + Vector3.UP * 1.0
+	var q := PhysicsRayQueryParameters3D.create(origin, origin + d * (burrow_wall_reach + 0.5))
+	q.exclude = [get_rid()]
+	q.collision_mask = weapon_clip_mask
+	var hit := space.intersect_ray(q)
+	if hit.is_empty():
+		return {}
+	var near: Vector3 = hit.position
+	var face := Vector3.ZERO
+	var found := false
+	var t := 0.5
+	while t <= burrow_wall_max_thickness:
+		var p := Vector3(near.x, origin.y, near.z) + d * t
+		if _burrow_point_is_free(p) and _burrow_point_is_free(p + d * 0.6):
+			face = p
+			found = true
+			break
+		t += 0.5
+	if not found:
+		return {}
+	var y0 := maxf(_terrain_height(face.x, face.z, global_position.y), global_position.y) + 0.3
+	for fly: float in [burrow_wall_fly_distance, 5.0, 3.0, 9.0]:
+		var spot: Vector3 = face + d * fly
+		var ground = _find_ground(spot)
+		if ground != null and _spot_is_clear(ground) and ground.y < y0 + 4.0:
+			return {"pos": ground, "look": null, "yaw": atan2(-d.x, -d.z), "front": true, "wall": true, "face": face, "dir": d, "y0": y0}
+	return {}
+
+
+## Fires a ray from the camera along where you're looking. Wherever it hits the collision mesh is where the portal opens:
+## on the ground you come out of the ground there; on a wall you burst out of that wall face and fly away from it.
+func _burrow_pick_look_exit() -> Dictionary:
+	var space := get_world_3d().direct_space_state
+	var from := camera.global_position
+	var fwd := -camera.global_transform.basis.z
+	var to := from + fwd * burrow_look_range
+	var ex: Array[RID] = [get_rid()]
+	var hit := {}
+	for i in 6:
+		var q := PhysicsRayQueryParameters3D.create(from, to)
+		q.exclude = ex
+		q.collision_mask = weapon_clip_mask
+		var r := space.intersect_ray(q)
+		if r.is_empty():
+			return {}
+		var col = r.collider
+		if col is Node and (col as Node).is_in_group("enemy"):
+			ex.append(r.rid)
+			continue
+		hit = r
+		break
+	if hit.is_empty():
+		return {}
+	var p: Vector3 = hit.position
+	var n: Vector3 = hit.normal
+	if n.y < -0.5:
+		return {}                                           # a ceiling: nothing to come out of
+	if n.y >= 0.5:
+		# Ground (or a gentle slope): come out of the ground at the spot you're looking at.
+		var g = _find_ground(p)
+		var gp: Vector3 = p
+		if g != null:
+			gp = g
+		if _spot_is_clear(gp):
+			return {"pos": gp, "look": null}
+		return {}
+	# A wall: the portal opens on its face and you fly out along its normal.
+	var d := Vector3(n.x, 0.0, n.z)
+	if d.length() < 0.1:
+		return {}
+	d = d.normalized()
+	var face := p + d * 0.05
+	var y0 := maxf(_terrain_height(face.x, face.z, global_position.y), p.y - 1.0) + 0.3
+	for fly: float in [burrow_wall_fly_distance, 5.0, 3.0, 9.0]:
+		var spot: Vector3 = face + d * fly
+		var ground = _find_ground(spot)
+		# Land on the ground there, and the flight path must be open (nothing between the portal and the landing).
+		if ground != null and _spot_is_clear(ground) and ground.y < y0 + 4.0 and _burrow_point_is_free(face + d * 1.0 + Vector3.UP * (y0 + 0.9 - face.y)):
+			return {"pos": ground, "look": null, "yaw": atan2(-d.x, -d.z), "front": true, "wall": true, "face": face, "dir": d, "y0": y0, "portal": p}
+	return {}
+
+
+## Picks where to come out: behind the nearest living enemy, otherwise where you're looking, otherwise straight ahead.
 func _burrow_pick_exit() -> Dictionary:
+	# The jump only goes to an enemy you are LOOKING at (inside the aim cone, with a clear line of sight to it).
+	# Otherwise you go the way you're looking.
 	var nearest: Node3D = null
-	var best_d := burrow_enemy_range
+	var best_ang := burrow_aim_degrees
+	var cam_pos := camera.global_position
+	var cam_fwd := -camera.global_transform.basis.z
 	for e in get_tree().get_nodes_in_group("enemy"):
 		var en := e as Node3D
 		if en == null or e.get("is_dead") == true:
 			continue
-		var d := global_position.distance_to(en.global_position)
-		if d < best_d and d > 1.0:
-			best_d = d
+		var to_e: Vector3 = (en.global_position + Vector3.UP * 1.0) - cam_pos
+		var dist := to_e.length()
+		if dist > burrow_enemy_range or dist < 1.0:
+			continue
+		var ang := rad_to_deg(cam_fwd.angle_to(to_e.normalized()))
+		if ang < best_ang and _burrow_can_see(en, cam_pos):
+			best_ang = ang
 			nearest = en
 
 	if nearest != null:
@@ -1227,6 +1641,10 @@ func _burrow_pick_exit() -> Dictionary:
 			var ground = _find_ground(spot)
 			if ground != null and _spot_is_clear(ground):
 				return {"pos": ground, "look": nearest.global_position}
+
+	var look_exit := _burrow_pick_look_exit()
+	if not look_exit.is_empty():
+		return look_exit
 
 	var fwd := -global_transform.basis.z
 	fwd.y = 0.0
@@ -1488,6 +1906,95 @@ void fragment() {
 	layer.add_child(damage_flash_rect)
 
 
+## NEW: a black shadow that creeps in from the screen edges until the whole view is dark (used while burrowing).
+func _build_shadow_cover() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 60            # above the damage flash
+	add_child(layer)
+
+	var shader := Shader.new()
+	shader.code = """
+shader_type canvas_item;
+uniform float cover = 0.0;
+void fragment() {
+	vec2 p = UV * 2.0 - 1.0;
+	float d = length(p) / 1.4142;
+	// ragged, slowly-moving edge so it feels like a shadow flowing over you, not a clean circle
+	float n = sin(p.x * 5.0 + TIME * 3.0) * 0.05 + sin(p.y * 7.0 - TIME * 2.3) * 0.05 + sin((p.x + p.y) * 9.0 + TIME * 4.0) * 0.03;
+	float edge = 1.5 - cover * 2.0;
+	float a = smoothstep(edge - 0.3, edge + 0.3, d + n);
+	if (cover > 0.995) { a = 1.0; }
+	float rim = a * (1.0 - a) * 4.0;
+	vec3 col = vec3(0.3, 0.06, 0.6) * rim * 0.5;   // faint purple glow on the leading edge, pure black once it has closed
+	COLOR = vec4(col, a);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("cover", 0.0)
+
+	shadow_cover_rect = ColorRect.new()
+	shadow_cover_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shadow_cover_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shadow_cover_rect.material = mat
+	shadow_cover_rect.visible = false
+	layer.add_child(shadow_cover_rect)
+
+
+## How dark the screen should be from where the camera is relative to the ground surface:
+## fully black while the eyes are anywhere near or under the ground (so you never see the void beneath the terrain),
+## fully clear once they're 0.8 m above it.
+func _eye_cover(ground_y: float, clear_height: float = 1.3, black_height: float = 0.6) -> float:
+	var eye_above := camera.global_position.y - ground_y
+	return 1.0 - smoothstep(black_height, clear_height, eye_above)
+
+
+## 0 = clear, 1 = completely black. This only sets the goal; _update_shadow_cover eases the screen toward it.
+func _set_shadow_cover(v: float, instant: bool = false) -> void:
+	shadow_cover_target = clampf(v, 0.0, 1.0)
+	if instant:
+		shadow_cover_cur = shadow_cover_target
+		_apply_shadow_cover()
+
+
+func _update_shadow_cover(delta: float) -> void:
+	if shadow_cover_cur == shadow_cover_target:
+		return
+	# Closing follows your eyes with no lag, so the void under the ground can never show; opening is eased.
+	var rate := 80.0 if shadow_cover_target > shadow_cover_cur else 45.0   # closes right away (never lets the void show), opens smoothly
+	shadow_cover_cur = lerpf(shadow_cover_cur, shadow_cover_target, 1.0 - exp(-rate * delta))
+	if absf(shadow_cover_cur - shadow_cover_target) < 0.002:
+		shadow_cover_cur = shadow_cover_target
+	_apply_shadow_cover()
+
+
+func _apply_shadow_cover() -> void:
+	if shadow_cover_rect == null:
+		return
+	shadow_cover_rect.visible = shadow_cover_cur > 0.001
+	(shadow_cover_rect.material as ShaderMaterial).set_shader_parameter("cover", shadow_cover_cur)
+	_set_void_black(shadow_cover_cur > 0.85)
+
+
+## While the screen is nearly black the camera uses a plain black environment instead of the sky, so if any of the
+## empty space under the ground gets drawn, it is black and not the bright sky / white void.
+func _set_void_black(on: bool) -> void:
+	if camera == null:
+		return
+	if on:
+		if camera.environment != _void_env or _void_env == null:
+			if _void_env == null:
+				_void_env = Environment.new()
+				_void_env.background_mode = Environment.BG_COLOR
+				_void_env.background_color = Color.BLACK
+				_void_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+				_void_env.ambient_light_color = Color.BLACK
+			_saved_cam_env = camera.environment
+			camera.environment = _void_env
+	elif _void_env != null and camera.environment == _void_env:
+		camera.environment = _saved_cam_env
+
+
 ## Kick the flash: blue if only the shield took damage, red if only health did, purple if one hit
 ## hurt both. Bigger hits flash harder.
 func _flash_damage(shield_dmg: float, health_dmg: float) -> void:
@@ -1544,6 +2051,10 @@ func die(wait: float = -1.0) -> void:
 	is_burrowing = false   # NEW
 	stealth_timer = 0.0
 	_end_shadow_travel()
+	_set_weapon_visible(true)
+	_restore_camera_near()
+	burrow_cam_lift = 0.0
+	_set_shadow_cover(0.0, true)
 	roll_request_pending = false
 	is_slamming = false
 	is_wall_clinging = false
@@ -1573,6 +2084,10 @@ func respawn() -> void:
 	burrow_cooldown_timer = 0.0   # NEW
 	is_burrowing = false          # NEW
 	stealth_timer = 0.0
+	_set_weapon_visible(true)
+	_restore_camera_near()
+	burrow_cam_lift = 0.0
+	_set_shadow_cover(0.0, true)
 	stamina_regen_timer = 0.0
 	shield_regen_timer = 0.0
 	health_regen_timer = 0.0
@@ -1914,6 +2429,9 @@ func start_slide():
 	else:
 		slide_direction = -transform.basis.z
 
+	slide_air_time = 0.0
+	velocity.x = slide_direction.x * slide_speed
+	velocity.z = slide_direction.z * slide_speed
 	is_crouching = true
 
 
