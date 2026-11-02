@@ -29,6 +29,12 @@ var face_original_material: Material = null
 @export var gravity := 9.8
 
 # NEW: stops enemies losing you the moment you sprint past them.
+@export var los_check_interval := 0.1   # PERFORMANCE: seconds between line-of-sight / hearing ray checks (0.1 = 10 a second instead of 60)
+@export var sleep_distance := 45.0       # PERFORMANCE: an idle enemy this far from the player only updates 1 frame in 6 (0 = never sleeps)
+@export var anim_distance := 40.0        # PERFORMANCE: beyond this distance the jelly squash/stretch animation is skipped (0 = always animate)
+var _los_timer := 0.0
+var _los_cache := false
+var _sleep_frame := 0
 @export var close_sense_radius := 3.5   # inside this distance it notices you even from behind (still needs a clear line)
 @export var lose_sight_grace := 1.5     # seconds it keeps coming after you lose sight, before giving up
 var lost_sight_timer := 0.0
@@ -205,6 +211,14 @@ func _physics_process(delta: float) -> void:
 		_apply_fade(delta)
 		return
 
+	# PERFORMANCE: an idle enemy far from the player does nothing useful (it can't see or hear you from here), so it only
+	# runs one physics frame in six. It always runs fully while it's in the air, so it still settles onto the ground.
+	if sleep_distance > 0.0 and state == State.IDLE and is_on_floor():
+		if global_position.distance_squared_to(player.global_position) > sleep_distance * sleep_distance:
+			_sleep_frame += 1
+			if _sleep_frame % 6 != 0:
+				return
+
 	attack_cooldown_timer = max(attack_cooldown_timer - delta, 0.0)
 	deaf_timer = max(deaf_timer - delta, 0.0)
 
@@ -253,7 +267,9 @@ func _physics_process(delta: float) -> void:
 			is_flashing = false
 			_apply_base_materials()
 
-	_apply_wobble(delta)
+	# PERFORMANCE: the squash-and-stretch animation is skipped for enemies too far away to notice it.
+	if anim_distance <= 0.0 or global_position.distance_squared_to(player.global_position) < anim_distance * anim_distance:
+		_apply_wobble(delta)
 	move_and_slide()
 
 # =========================
@@ -263,7 +279,13 @@ func _check_detection() -> void:
 	# NEW: right after the player pops out of the ground (burrow) they're hidden for a moment: no sight, no hearing.
 	var stealth = player.get("stealth_timer")
 	var hidden: bool = stealth != null and stealth > 0.0
-	can_see_player = false if hidden else _has_line_of_sight()
+	# PERFORMANCE: the line-of-sight ray is only re-cast a few times a second (each enemy on its own beat), not every frame.
+	_los_timer -= get_physics_process_delta_time()
+	var refresh := _los_timer <= 0.0
+	if refresh:
+		_los_timer = los_check_interval + randf() * 0.05
+		_los_cache = _has_line_of_sight()
+	can_see_player = false if hidden else _los_cache
 	# Once committed to an attack, don't let detection interrupt it.
 	if state == State.ATTACKING:
 		return
@@ -276,6 +298,8 @@ func _check_detection() -> void:
 		return
 	# While looking toward a shot, only actually SEEING you makes it come after you (no sound detection).
 	if state == State.LOOKING or deaf_timer > 0.0:
+		return
+	if not refresh:
 		return
 	var dist = global_position.distance_to(player.global_position)
 	var is_crouching = player.get("is_crouching") == true

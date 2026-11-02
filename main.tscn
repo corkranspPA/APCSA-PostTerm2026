@@ -17,6 +17,7 @@
 [ext_resource type="Script" uid="uid://db06uymfyne32" path="res://natural_lighting.gd" id="14_w48qg"]
 [ext_resource type="Script" uid="uid://cdbe5vb1mpobr" path="res://enemy_spawner.gd" id="16_2cqfq"]
 [ext_resource type="Script" uid="uid://cqtsb3x25uwr8" path="res://sakura_trees.gd" id="17_yaehf"]
+[ext_resource type="Script" uid="uid://tapxqp2j6n0g" path="res://performance.gd" id="18_074og"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
 
@@ -200,3 +201,6 @@ script = ExtResource("16_2cqfq")
 
 [node name="sakura trees" type="Node3D" parent="." unique_id=1408846149]
 script = ExtResource("17_yaehf")
+
+[node name="Node" type="Node" parent="." unique_id=1651693110]
+script = ExtResource("18_074og")

@@ -97,6 +97,7 @@ extends Node3D
 @export_group("View")
 @export var load_only_in_view := true                  # chunks outside the camera's view are not drawn (off = draw the whole circle)
 @export var always_load_radius := 2                    # chunks this close are always drawn, even behind you (no holes when you turn)
+@export var far_chunks_cast_shadows := false              # PERFORMANCE: off = only the close, full-detail ground casts shadows (faster)
 @export var view_margin := 1.3                         # how generously the view is measured (higher = chunks appear a bit earlier)
 @export var unload_delay := 3.0                        # seconds a chunk can stay out of view before its mesh is removed
 @export var update_interval := 0.25                    # how often (seconds) the view is checked
@@ -866,6 +867,10 @@ func _make_mesh_node(data: Dictionary, parent: Node3D) -> MeshInstance3D:
 	mesh.surface_set_material(0, _material)
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
+	# PERFORMANCE: distant (lower-detail) ground doesn't cast shadows. It's far away so you can't tell, but the sun's shadow
+	# pass no longer has to draw it.
+	if not far_chunks_cast_shadows and int(data.get("tier", 0)) >= 1:
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	parent.add_child(mi)
 	return mi
 

@@ -289,7 +289,7 @@ var is_slamming := false
 @export var slide_duration := 1.0
 @export var slide_friction := 4.5
 @export var slide_burst := 1.6
-@export var slope_slide_boost := 2.2          # (no longer used: gravity does this now, see slide_gravity_mult)
+@export var slope_slide_boost := 2.2
 @export var slide_gravity_mult := 0.0         # NEW: extra gravity pull down a slope (0 = none: speed is only kept, not added. Raise it to speed up downhill)
 @export var slide_slope_friction_mult := 0.15 # NEW: friction left on a slope (0 = none). This is what lets a slide keep going down a hill
 @export var slide_downhill_steer := 14.0       # NEW: how quickly a slide on a slope swings round to head straight DOWN the hill (not sideways across it)
@@ -597,9 +597,6 @@ func _physics_process(delta: float) -> void:
 
 	dash_cooldown_timer = max(dash_cooldown_timer - delta, 0.0)
 	burrow_cooldown_timer = max(burrow_cooldown_timer - delta, 0.0)   # NEW
-	# While sliding, stick to the ground firmly and treat steeper ground as floor, so a fast slide can follow a mountainside.
-	floor_snap_length = slide_snap_length if is_sliding else _base_floor_snap
-	floor_max_angle = deg_to_rad(slide_floor_angle) if is_sliding else _base_floor_angle
 	stealth_timer = max(stealth_timer - delta, 0.0)
 	knockback_timer = max(knockback_timer - delta, 0.0)
 
@@ -796,61 +793,23 @@ func _physics_process(delta: float) -> void:
 	else:
 
 		if is_sliding:
-			# GRAVITY-BASED SLIDE: gravity pulls you down the slope, friction fades away on slopes, so on a hill or a
-			# mountainside the slide speeds up and keeps going. It only runs out on flat or gently sloped ground.
-			var steep := 0.0                       # sine of the slope angle: 0 = flat ... 1 = a vertical wall
-			var v := velocity                      # the real velocity after last frame's movement (so walls and bumps slow you down)
+			slide_timer -= delta
+
+			var slope_factor := 1.0
 			if is_on_floor():
-				slide_air_time = 0.0
-				var n := get_floor_normal()
-				var pull := Vector3.DOWN.slide(n)  # points straight downhill; its length is the sine of the slope angle
-				steep = pull.length()
-				# The slide keeps its OWN speed instead of trusting the velocity Godot hands back (move_and_slide trims it on
-				# slopes, which is what was killing the momentum). Only a real collision (much slower than intended) lowers it.
-				var real_sp := v.length()
-				var base_sp := slide_speed
-				if real_sp < slide_speed * 0.5:
-					base_sp = real_sp
-				var dir0 := v.slide(n)
-				if dir0.length() < 0.01:
-					dir0 = slide_direction.slide(n)
-				dir0 = dir0.normalized()
-				v = dir0 * base_sp
-				v += pull * absf(get_gravity().y) * slide_gravity_mult * delta
-				var fr := slide_friction * lerpf(1.0, slide_slope_friction_mult, clampf(steep * 6.0, 0.0, 1.0))
-				var sp := minf(maxf(v.length() - fr * delta, 0.0), slide_max_speed)
-				v = v.slide(n)                     # keep the motion along the ground
-				if v.length() > 0.01:
-					# On a slope the slide is steered round to head straight down the hill, so it never just drifts sideways across it.
-					var cur := v.normalized()
-					if steep > 0.01:
-						var down_dir := pull.normalized()
-						cur = cur.lerp(down_dir, clampf(slide_downhill_steer * clampf(steep * 10.0, 0.0, 1.0) * delta, 0.0, 1.0))
-						if cur.length() < 0.01:
-							cur = down_dir
-						cur = cur.normalized().slide(n).normalized()
-					v = cur * sp
-				else:
-					v = Vector3.ZERO
-				velocity = v
-			else:
-				# In the air gravity (applied above) carries you; land and the slide carries on.
-				slide_air_time += delta
-				if slide_air_time > 1.0:
-					stop_slide()
+				var n = get_floor_normal()
+				var slope = rad_to_deg(acos(n.dot(Vector3.UP)))
+				if slope > 5.0:
+					slope_factor = 1.0 + (slope / 45.0) * slope_slide_boost
 
-			if is_sliding:
-				slide_speed = velocity.length()
-				var hv := Vector2(velocity.x, velocity.z)
-				if hv.length() > 0.5:
-					slide_direction = Vector3(hv.x, 0.0, hv.y).normalized()
+			slide_speed -= slide_friction * delta
+			slide_speed = max(slide_speed, 0.0)
 
-				var on_slope := steep >= slide_keep_going_slope
-				# The timer only runs down on flat / gentle ground, so a slide down a mountain never times out.
-				slide_timer -= delta * (1.0 - clampf(steep * 6.0, 0.0, 1.0))
-				# On a hill the slide only ends when its speed runs out (or you stop it); on flat ground the timer ends it too.
-				if slide_speed < 2.0 or (not on_slope and slide_timer <= 0.0):
-					stop_slide()
+			velocity.x = slide_direction.x * slide_speed * slope_factor
+			velocity.z = slide_direction.z * slide_speed * slope_factor
+
+			if slide_timer <= 0.0 or slide_speed < 2.0:
+				stop_slide()
 
 		else:
 			var current_speed = speed
@@ -1774,14 +1733,23 @@ func _remove_weapon_clip() -> void:
 	_weapon_clip_rot = 0.0
 
 
+var _weapon_clip_timer := 0.0
+var _weapon_clip_target := 0.0
+
+
 func _update_weapon_clip(delta: float) -> void:
 	var w := Weapon as Node3D
 	if w == null or not is_instance_valid(w) or camera == null:
 		return
 
-	var target := 0.0
-	if weapon_clip_enabled and not is_dead:
-		target = _weapon_clip_needed(w)
+	# PERFORMANCE: the two wall-check rays are only re-cast about 20 times a second; the smoothing below hides the gaps.
+	_weapon_clip_timer -= delta
+	if _weapon_clip_timer <= 0.0:
+		_weapon_clip_timer = 0.05
+		_weapon_clip_target = 0.0
+		if weapon_clip_enabled and not is_dead and not is_burrowing:
+			_weapon_clip_target = _weapon_clip_needed(w)
+	var target := _weapon_clip_target
 
 	var rate := weapon_clip_out_speed if target > _weapon_clip_amount else weapon_clip_return_speed
 	_weapon_clip_amount = lerpf(_weapon_clip_amount, target, 1.0 - exp(-rate * delta))
