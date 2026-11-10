@@ -40,8 +40,8 @@ extends Node3D
 @export_range(-1.0, 1.0) var forest_high := 0.5        # noise value where the grove is fully dense
 @export_range(0.0, 1.0) var max_density := 0.55        # chance a tree spot holds a tree inside a grove (raise for a thicker forest)
 @export_range(0.0, 1.0) var min_density := 0.05        # chance in clearings (lone trees)
-@export var scale_min := 0.75
-@export var scale_max := 1.3
+@export var scale_min := 1.1
+@export var scale_max := 1.95
 @export var max_slope_degrees := 38.0                  # no trees on steeper ground (raised so mountain slopes get trees)
 @export var max_tree_height := 90.0                    # no trees above this height (mountain tops)
 @export var tree_line_start := 45.0                    # above this height the trees thin out, reaching none at max_tree_height
