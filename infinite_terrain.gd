@@ -34,7 +34,7 @@ extends Node3D
 
 @export_group("Distance fog")
 @export var fog_enabled := true                        # sets up fog in your WorldEnvironment so the end of the view fades out (skipped if it already has fog on)
-@export var fog_strength := 0.2                        # 1 = the far edge of the view is about 95 % faded. Lower = clearer, higher = hazier
+@export var fog_strength := 1.0                        # 1 = the far edge of the view is about 95 % faded. Lower = clearer, higher = hazier
 @export var fog_color := Color(0.74, 0.82, 0.92)       # haze colour
 @export_range(0.0, 1.0) var fog_sky_blend := 0.5       # how much the haze takes on the sky's colour (hides the line where ground meets sky)
 
@@ -42,6 +42,16 @@ extends Node3D
 @export var forest_enabled := true                     # paint the groves from the sakura tree script onto the far ground
 @export var forest_color := Color(0.9, 0.66, 0.75)     # colour of a far-away grove (a pink-ish blossom blend)
 @export_range(0.0, 1.0) var forest_strength := 0.8     # how strongly the groves are painted (0 = none)
+
+@export_group("Distant trees")
+@export var far_trees_enabled := true                  # real (very cheap) trees on the far ground, including on mountains. Needs the tree script in the scene.
+@export var far_tree_distance := 1800.0                # how far out these trees are drawn (metres)
+@export var far_tree_cell := 160.0                     # trees are grouped into cells this wide (one draw call per cell)
+@export var far_tree_spacing := 16.0                   # metres between possible tree spots (bigger = fewer trees, cheaper)
+@export var far_tree_scale := 1.6                      # distant trees are drawn this much bigger, to make up for there being fewer of them
+@export var far_tree_jobs := 1                         # cells being worked out on threads at once
+@export var far_tree_crown_color := Color(0.95, 0.72, 0.8)
+@export var far_tree_trunk_color := Color(0.3, 0.22, 0.2)
 
 var _ready_done := false
 var _radii := PackedFloat32Array()                     # ring boundaries: ring i covers _radii[i] .. _radii[i+1]
@@ -67,6 +77,20 @@ var _f_line := 45.0
 var _f_maxh := 90.0
 var _f_slope := 38.0
 var _f_clear := 40.0
+
+var _ft_on := false
+var _ft_mesh: ArrayMesh
+var _ft_seed := 0
+var _ft_game_spacing := 10.0                           # the tree script's own spacing (used to keep the same overall density)
+var _ft_smin := 0.75
+var _ft_smax := 1.3
+var _ft_start := 280.0                                 # far trees only exist beyond this distance (the real trees cover everything nearer)
+var _ft_near_zone := 435.0                             # inside this the visible ground is the real chunks, beyond it the far tiles
+var _ft_cells := {}                                    # Vector3i(band, x, z) -> MultiMeshInstance3D (or null for a cell with no trees)
+var _ft_last := {}
+var _ft_jobs := {}
+var _ft_results := {}
+var _ft_queue: Array[Vector3i] = []
 
 
 func _ready() -> void:
@@ -110,6 +134,9 @@ func _exit_tree() -> void:
 	for key in _jobs.keys():
 		WorkerThreadPool.wait_for_task_completion(int(_jobs[key]))
 	_jobs.clear()
+	for key in _ft_jobs.keys():
+		WorkerThreadPool.wait_for_task_completion(int(_ft_jobs[key]))
+	_ft_jobs.clear()
 
 
 func _process(delta: float) -> void:
@@ -121,6 +148,9 @@ func _process(delta: float) -> void:
 		_update(_focus())
 	_dispatch()
 	_collect()
+	if _ft_on:
+		_ft_dispatch()
+		_ft_collect()
 
 
 func _focus() -> Vector3:
@@ -182,6 +212,9 @@ func _update(pos: Vector3) -> void:
 			(_tiles[key] as Node).queue_free()
 			_tiles.erase(key)
 			_last_needed.erase(key)
+
+	if _ft_on:
+		_update_far_trees(here, now)
 
 
 # -------------------------
@@ -332,6 +365,18 @@ func _setup_forest() -> void:
 	_forest_col = Color.WHITE.lerp(forest_color, float(terrain.get("_tint_k")))
 	_forest_on = true
 
+	# Distant trees: same seed, groves, tree line and slope limit as the tree script, on a coarser grid.
+	_ft_on = false
+	if far_trees_enabled:
+		_ft_seed = int(trees.get("_seed"))
+		_ft_game_spacing = float(trees.get("spacing"))
+		_ft_smin = float(trees.get("scale_min"))
+		_ft_smax = float(trees.get("scale_max"))
+		_ft_start = float(trees.get("draw_distance")) + float(trees.get("cell_size")) * 1.5
+		_ft_near_zone = float(terrain.get("render_distance")) * float(terrain.get("chunk_size")) * 0.85
+		_ft_mesh = _make_far_tree_mesh()
+		_ft_on = true
+
 
 ## Turns on haze in the scene's Environment so the far edge fades out instead of ending in a hard line.
 func _setup_fog() -> void:
@@ -357,6 +402,227 @@ func _setup_fog() -> void:
 	env.fog_light_color = fog_color
 	env.fog_density = fog_strength * 3.0 / maxf(far_distance, 1.0)   # about 95 % faded at far_distance
 	env.fog_aerial_perspective = fog_sky_blend
+
+
+# -------------------------
+# DISTANT TREES
+# -------------------------
+## A very low-poly tree (about 45 triangles): a trunk that reaches well below the ground (so it never floats above the
+## slightly lowered far ground) and a flattened blossom crown.
+func _make_far_tree_mesh() -> ArrayMesh:
+	var m := ArrayMesh.new()
+
+	var trunk := CylinderMesh.new()
+	trunk.top_radius = 0.3
+	trunk.bottom_radius = 0.5
+	trunk.height = 11.5
+	trunk.radial_segments = 5
+	trunk.rings = 1
+	trunk.cap_top = false
+	trunk.cap_bottom = false
+	var ta := trunk.get_mesh_arrays()
+	var tv: PackedVector3Array = ta[Mesh.ARRAY_VERTEX]
+	for i in tv.size():
+		tv[i] += Vector3(0.0, -0.25, 0.0)               # trunk spans from 6 m below the base up to 5.5 m
+	ta[Mesh.ARRAY_VERTEX] = tv
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, ta)
+
+	var crown := SphereMesh.new()
+	crown.radius = 1.0
+	crown.height = 2.0
+	crown.radial_segments = 6
+	crown.rings = 3
+	var ca := crown.get_mesh_arrays()
+	var cv: PackedVector3Array = ca[Mesh.ARRAY_VERTEX]
+	for i in cv.size():
+		cv[i] = Vector3(cv[i].x * 3.4, cv[i].y * 2.3 + 5.4, cv[i].z * 3.4)
+	ca[Mesh.ARRAY_VERTEX] = cv
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, ca)
+
+	var bark := StandardMaterial3D.new()
+	bark.albedo_color = far_tree_trunk_color
+	bark.roughness = 1.0
+	var leaf := StandardMaterial3D.new()
+	leaf.albedo_color = far_tree_crown_color
+	leaf.roughness = 1.0
+	leaf.diffuse_mode = BaseMaterial3D.DIFFUSE_LAMBERT_WRAP
+	m.surface_set_material(0, bark)
+	m.surface_set_material(1, leaf)
+	return m
+
+
+func _ft_centre(key: Vector3i) -> Vector2:
+	return Vector2((key.y + 0.5) * far_tree_cell, (key.z + 0.5) * far_tree_cell)
+
+
+## Which far-ground ring is visible at this distance (-1 = the real chunks). Used to stand trees exactly on the ground that is drawn.
+func _band_for(d: float) -> int:
+	if d < _ft_near_zone:
+		return -1
+	for lvl in _levels:
+		if d <= _radii[lvl + 1]:
+			return lvl
+	return _levels - 1
+
+
+func _update_far_trees(here: Vector2, now: float) -> void:
+	var cs := far_tree_cell
+	var span := int(ceil(far_tree_distance / cs)) + 1
+	var ci := Vector2i(floori(here.x / cs), floori(here.y / cs))
+	var wanted := {}
+	_ft_queue.clear()
+	for dx in range(-span, span + 1):
+		for dz in range(-span, span + 1):
+			var ix := ci.x + dx
+			var iz := ci.y + dz
+			var d := Vector2((ix + 0.5) * cs, (iz + 0.5) * cs).distance_to(here)
+			if d < _ft_start or d > far_tree_distance:
+				continue
+			var key := Vector3i(_band_for(d), ix, iz)
+			wanted[key] = true
+			_ft_last[key] = now
+			if not _ft_cells.has(key) and not _ft_jobs.has(key):
+				_ft_queue.append(key)
+	_ft_queue.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		return _ft_centre(a).distance_squared_to(here) > _ft_centre(b).distance_squared_to(here))   # nearest last
+
+	for key in _ft_cells.keys():
+		if not wanted.has(key) and now - float(_ft_last.get(key, -1e9)) > keep_delay:
+			var old = _ft_cells[key]
+			if old != null:
+				(old as Node).queue_free()
+			_ft_cells.erase(key)
+			_ft_last.erase(key)
+
+
+func _ft_dispatch() -> void:
+	while _ft_jobs.size() < far_tree_jobs and _ft_queue.size() > 0:
+		var key: Vector3i = _ft_queue.pop_back()
+		if _ft_cells.has(key) or _ft_jobs.has(key):
+			continue
+		_ft_jobs[key] = WorkerThreadPool.add_task(_ft_job.bind(key), false, "far trees")
+
+
+func _ft_job(key: Vector3i) -> void:
+	var data := _ft_generate(key)
+	_mutex.lock()
+	_ft_results[key] = data
+	_mutex.unlock()
+
+
+func _ft_collect() -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	for key in _ft_jobs.keys():
+		var id := int(_ft_jobs[key])
+		if not WorkerThreadPool.is_task_completed(id):
+			continue
+		WorkerThreadPool.wait_for_task_completion(id)
+		_ft_jobs.erase(key)
+		_mutex.lock()
+		var data = _ft_results.get(key)
+		_ft_results.erase(key)
+		_mutex.unlock()
+		if data == null or _ft_cells.has(key):
+			continue
+		if now - float(_ft_last.get(key, -1e9)) > keep_delay:
+			continue
+		_ft_install(key, data)
+		return                                          # one cell per frame
+
+
+## Worker thread: works out where the trees of one cell stand. Returns 5 numbers per tree: x, y, z, yaw, scale.
+func _ft_generate(key: Vector3i) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	var per := maxi(int(round(far_tree_cell / far_tree_spacing)), 1)
+	var sp := far_tree_cell / float(per)
+	# Far spots are further apart than the real ones, so each spot stands for more ground; this keeps the same overall density.
+	var area_k := (sp * sp) / (_ft_game_spacing * _ft_game_spacing)
+	var rng := RandomNumberGenerator.new()
+	for gi in per:
+		for gj in per:
+			var ix := key.y * per + gi
+			var iz := key.z * per + gj
+			rng.seed = hash(Vector3i(_ft_seed + 5311, ix, iz))
+			var keep_r := rng.randf()
+			var jx := rng.randf_range(-1.0, 1.0)
+			var jz := rng.randf_range(-1.0, 1.0)
+			var yaw := rng.randf() * TAU
+			var sr := rng.randf()
+			var x := (float(ix) + 0.5 + jx * 0.35) * sp
+			var z := (float(iz) + 0.5 + jz * 0.35) * sp
+			if x * x + z * z < _f_clear * _f_clear:
+				continue
+			var dens := lerpf(_f_min, _f_max, smoothstep(_f_low, _f_high, _forest_noise.get_noise_2d(x, z))) * area_k
+			if keep_r > minf(dens, 1.0):
+				continue
+			var h: float = terrain.height_at(x, z)
+			if h > _f_maxh:
+				continue
+			if keep_r > minf(dens, 1.0) * (1.0 - smoothstep(_f_line, _f_maxh, h)):      # thinner towards the tree line
+				continue
+			var sx: float = terrain.height_at(x + 3.0, z) - terrain.height_at(x - 3.0, z)
+			var sz: float = terrain.height_at(x, z + 3.0) - terrain.height_at(x, z - 3.0)
+			if rad_to_deg(atan(sqrt(sx * sx + sz * sz) / 6.0)) > _f_slope:
+				continue
+			var s := lerpf(_ft_smin, _ft_smax, sr) * far_tree_scale
+			out.append_array(PackedFloat32Array([x, _ft_base_y(x, z, h, key.x), z, yaw, s]))
+	return out
+
+
+## The height a tree should stand at: the real ground height in the real-chunk zone, otherwise the height of the far tile that
+## is actually drawn there (the tiles are lowered a little, and cut corners on bumpy ground).
+func _ft_base_y(x: float, z: float, h: float, band: int) -> float:
+	if band < 0:
+		return h - 0.3
+	var res := maxi(tile_resolution, 2)
+	var cl := _tile_size(band) / float(res)
+	var gx := floorf(x / cl)
+	var gz := floorf(z / cl)
+	var u := x / cl - gx
+	var v := z / cl - gz
+	var ha: float = terrain.height_at(gx * cl, gz * cl)
+	var hb: float = terrain.height_at((gx + 1.0) * cl, gz * cl)
+	var hc: float = terrain.height_at(gx * cl, (gz + 1.0) * cl)
+	var hd: float = terrain.height_at((gx + 1.0) * cl, (gz + 1.0) * cl)
+	var surf: float
+	if u + v <= 1.0:                                    # the same two triangles the tile mesh is made of
+		surf = ha + (hb - ha) * u + (hc - ha) * v
+	else:
+		surf = hd + (hc - hd) * (1.0 - u) + (hb - hd) * (1.0 - v)
+	return surf - (sink + cl * sink_per_cell)
+
+
+func _ft_install(key: Vector3i, data: PackedFloat32Array) -> void:
+	# A cell that changed ring is rebuilt (trees stand a little differently); drop its older build now.
+	for k in _ft_cells.keys():
+		if k != key and k.y == key.y and k.z == key.z:
+			var old = _ft_cells[k]
+			if old != null:
+				(old as Node).queue_free()
+			_ft_cells.erase(k)
+			_ft_last.erase(k)
+	var n := data.size() / 5
+	if n == 0:
+		_ft_cells[key] = null
+		return
+	var c := _ft_centre(key)
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _ft_mesh
+	mm.instance_count = n
+	for i in n:
+		var o := i * 5
+		var s := data[o + 4]
+		var b := Basis(Vector3.UP, data[o + 3]).scaled(Vector3(s, s, s))
+		mm.set_instance_transform(i, Transform3D(b, Vector3(data[o] - c.x, data[o + 1], data[o + 2] - c.y)))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.top_level = true
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	add_child(mmi)
+	mmi.global_position = Vector3(c.x, 0.0, c.y)
+	_ft_cells[key] = mmi
 
 
 func _edge_vertex(e: int, k: int, n: int) -> int:
