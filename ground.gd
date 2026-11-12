@@ -4,7 +4,9 @@ extends Node3D
 ##
 ## - Every chunk's height comes from world coordinates, so neighbouring chunks always join perfectly, and the same seed
 ##   always gives the same world.
-## - Rolling hills, flat plains, fine bumps, and the occasional big mountain: a large hill that stands out of the ground (rock on steep or high ground, snow on peaks).
+## - Rolling hills, flat plains, fine bumps, and the occasional big mountain (rock on steep or high ground, snow on peaks). Mountains differ in
+##   height, and come in several kinds: rounded peaks, craggy peaks, flat-topped mesas with steep walls, stepped terraces of cliffs,
+##   and one-sided cliffs with a sheer face (see mountain_height_variation and mountain_wall_chance).
 ## - Chunks are only drawn when they are close to you or inside the camera's view. Chunks behind you lose their mesh after
 ##   a short delay, but their COLLISION stays loaded (around you, and around anything in the groups listed below),
 ##   so enemies, bullets and anything else that is happening keeps running on solid ground. Nothing else in your game
@@ -16,9 +18,11 @@ extends Node3D
 ##   frame and caused stutters while you ran. Now it is done on worker threads, and the main thread only turns finished
 ##   chunks into meshes and collision, a couple per frame.
 ##
-## - NEW: floating objects. Solid objects in your scene (StaticBody3D, or anything in the group "terrain_attach") that are
-##   floating above the ground get ground built up underneath them, so the terrain rises up and meets the bottom of the object.
-##   It is found automatically when the game starts. Put a node in the group "no_terrain_attach" to leave it alone.
+## - NEW: floating objects. The ground looks through your scene for a MeshInstance3D and a CollisionShape3D in the same spot
+##   (an object you can see AND walk into). If its bottom is floating above the ground, the terrain rises up underneath it and
+##   meets the bottom. Enemies, trees, the player and anything that moves are ignored. Meshes with no collision, and collision
+##   with no mesh, are left alone. It is found automatically when the game starts. Put a node in the group "no_terrain_attach"
+##   to leave it alone, or in the group "terrain_attach" to force it to count even if it is a mover.
 ##
 ## Handy for your other scripts:  get_node("Terrain").height_at(x, z)  returns the ground height at any spot
 ## (including the ground built up under floating objects).
@@ -45,6 +49,8 @@ extends Node3D
 @export var detail_wavelength := 14.0
 @export_range(0.0, 1.0) var mountain_amount := 0.35    # chance that each mountain slot holds a mountain (0 = none, 1 = every slot)
 @export var mountain_height := 100.0                   # how high a typical mountain stands above the ground (metres); each one varies a bit
+@export_range(0.0, 1.0) var mountain_height_variation := 0.6   # how much the height differs from mountain to mountain (0 = all alike, 1 = from low hills to giants)
+@export_range(0.0, 1.0) var mountain_wall_chance := 0.5        # share of mountains with flat walls and sheer faces (flat-topped mesas, stepped terraces, one-sided cliffs). The rest are peaks.
 @export var mountain_radius := 260.0                   # how wide a typical mountain is, from its middle to its foot (metres)
 @export var mountain_spacing := 700.0                  # size of the grid of mountain slots (metres): bigger = mountains further apart
 @export var spawn_flat_radius := 40.0                  # ground around the world origin stays flat, so you never start inside a mountain
@@ -53,10 +59,14 @@ extends Node3D
 # FLOATING OBJECTS - the ground rises up to meet them
 # -------------------------
 @export_group("Floating objects")
-@export var attach_floating_objects := true            # solid objects found floating above the ground get ground built up to their bottom
+@export var attach_floating_objects := true            # objects with BOTH a mesh and a collision shape in the same spot get ground built up to their bottom
+@export var attach_max_size := 150.0                   # ignore things wider than this (a huge floor plane, a sky dome...)
+@export var attach_overlap := 0.3                      # how much of a mesh and a collision shape must overlap (from above) to count as "the same spot" (0..1)
 @export var attach_min_gap := 0.15                     # ignore objects less than this far off the ground (they are just resting on it)
 @export var attach_max_gap := 40.0                     # ignore objects higher than this above the ground (clouds, the moon... things that SHOULD float)
 @export var attach_margin := 0.3                       # the raised ground reaches this far past the object's edge (metres)
+@export var attach_embed := 0.1                        # the raised ground goes this far INTO the bottom of the object, so no sliver of gap is left (metres)
+@export var attach_snap_to_grid := true                # stretch the raised patch out to the ground's own mesh grid, so every triangle under the object is fully raised (no gaps at the edges)
 @export var attach_blend := 4.0                        # how far past that the raised ground slopes back down to the normal ground (metres)
 
 # -------------------------
@@ -121,7 +131,7 @@ var _n_plains: FastNoiseLite
 var _n_mask: FastNoiseLite
 var _n_ridge: FastNoiseLite
 var _n_patch: FastNoiseLite
-var _mtn_cells := {}                                   # Vector2i -> Vector4(x, z, radius, height) for each mountain slot (height 0 = none)
+var _mtn_cells := {}                                   # Vector2i -> PackedFloat32Array [x, z, radius, height, kind, cos angle, sin angle, steps] for each mountain slot (empty = none)
 var _anchors := PackedFloat32Array()                    # NEW: raised ground under floating objects, 6 numbers each: centre x, z, half size x, z, bottom y, blend
 var _mtn_mutex := Mutex.new()                          # the mountain memory is used from several threads, so it is locked
 var _idx_mutex := Mutex.new()
@@ -233,15 +243,38 @@ func _natural_height(x: float, z: float) -> float:
 		for ox in range(-1, 2):
 			for oz in range(-1, 2):
 				var m := _mountain_at(Vector2i(cx + ox, cz + oz))
-				if m.w <= 0.0:
+				if m.size() == 0:
 					continue
-				var dx := x - m.x
-				var dz := z - m.y
-				var reach := m.z * (1.0 + 0.25 * _n_mask.get_noise_2d(x, z))   # wobbles the outline so it isn't a perfect circle
+				var dx := x - m[0]
+				var dz := z - m[1]
+				var reach: float = m[2] * (1.0 + 0.25 * _n_mask.get_noise_2d(x, z))   # wobbles the outline so it isn't a perfect circle
 				var d2 := (dx * dx + dz * dz) / (reach * reach)
 				if d2 < 1.0:
-					var f := 1.0 - d2
-					h += m.w * f * f * (0.88 + 0.24 * (_n_ridge.get_noise_2d(x, z) * 0.5 + 0.5))   # smooth rounded hill with a lumpy surface
+					var f := 1.0 - d2                                   # 1 in the middle, 0 at the foot
+					var ridge := _n_ridge.get_noise_2d(x, z) * 0.5 + 0.5
+					var prof := f * f                                   # shape of the slope, 0..1
+					var lump := 0.88 + 0.24 * ridge                     # lumpy surface
+					match int(m[4]):
+						1:   # CRAG: a sharper, craggier peak
+							prof = pow(f, 1.45)
+							lump = 0.6 + 0.8 * ridge
+						2:   # MESA: steep walls all round and a flat top
+							prof = smoothstep(0.0, 0.15, f)
+							lump = 0.97 + 0.06 * ridge
+						3:   # TERRACED: flat ledges with a sheer wall between each one, like layered cliffs
+							var steps: float = m[7]
+							var t := f * steps
+							var fl := floorf(t)
+							prof = (fl + smoothstep(0.0, 0.22, t - fl)) / steps
+							lump = 0.97 + 0.06 * ridge
+						4:   # CLIFF: a sloping tableland that ends in one sheer wall facing a random direction
+							var u := (dx * m[5] + dz * m[6]) / m[2]       # -1 at the back .. +1 at the front
+							var face := 0.3
+							var sheer := 1.0 - smoothstep(face - 0.05, face + 0.05, u)
+							var back := lerpf(0.6, 1.0, smoothstep(-1.0, face, u))
+							prof = smoothstep(0.0, 0.4, f) * sheer * back
+							lump = 0.96 + 0.08 * ridge
+					h += m[3] * prof * lump
 	var flat_w := smoothstep(spawn_flat_radius, spawn_flat_radius * 2.0, sqrt(x * x + z * z))
 	return h * flat_w
 
@@ -269,46 +302,155 @@ func height_at(x: float, z: float) -> float:
 # -------------------------
 # FLOATING OBJECTS
 # -------------------------
-## Looks through the scene for solid objects that float above the ground and remembers where to raise the ground.
-## Returns how many it found. Called once at start-up (before any ground is built); call rescan_floating_objects() later
-## if you add or move objects while the game is running.
+## Looks through the scene for objects that have a MeshInstance3D and a CollisionShape3D in the same spot and float above
+## the ground, and remembers where to raise the ground. Returns how many it found. Called once at start-up (before any ground
+## is built); call rescan_floating_objects() later if you add or move objects while the game is running.
 func _scan_anchors() -> int:
 	var root := get_tree().current_scene
 	if root == null:
 		return 0
+
+	# 1. Every visible mesh and every solid collision shape in the scene (enemies, trees, the player and movers are skipped).
+	var meshes: Array[AABB] = []
+	var shapes: Array[AABB] = []
+	for n in root.find_children("*", "Node3D", true, false):
+		if n is MeshInstance3D:
+			var mi := n as MeshInstance3D
+			if mi.mesh == null or not mi.is_visible_in_tree() or _attach_excluded(mi):
+				continue
+			var mb: AABB = mi.global_transform * mi.get_aabb()
+			if mb.size.length() > 0.001:
+				meshes.append(mb)
+		elif n is CollisionShape3D:
+			var cs := n as CollisionShape3D
+			if cs.shape == null or cs.disabled or cs.get_parent() is Area3D or _attach_excluded(cs):
+				continue
+			if cs.shape is WorldBoundaryShape3D or cs.shape is HeightMapShape3D or cs.shape is SeparationRayShape3D:
+				continue                                    # the endless floor, other terrain and rays are not "objects"
+			var sb := _shape_world_aabb(cs)
+			if sb.size.length() > 0.001:
+				shapes.append(sb)
+
+	# 2. A collision shape that has a mesh in the same spot makes one object (the box around both).
+	var boxes: Array[AABB] = []
+	for sb in shapes:
+		var merged := sb
+		var paired := false
+		for mb in meshes:
+			if _same_spot(sb, mb):
+				merged = merged.merge(mb)
+				paired = true
+		if paired:
+			boxes.append(merged)
+
+	# 3. Pieces of one object (a building made of several shapes) become one box.
+	var changed := true
+	while changed:
+		changed = false
+		for i in boxes.size():
+			for j in range(i + 1, boxes.size()):
+				if boxes[i].grow(0.3).intersects(boxes[j]):
+					boxes[i] = boxes[i].merge(boxes[j])
+					boxes.remove_at(j)
+					changed = true
+					break
+			if changed:
+				break
+
+	# 4. Keep the ones that really float, and remember where to raise the ground.
 	var out := PackedFloat32Array()
 	var count := 0
-	for n in root.find_children("*", "Node3D", true, false):
-		if not (n is StaticBody3D or n.is_in_group("terrain_attach")):
+	for box in boxes:
+		if box.size.x < 0.3 or box.size.z < 0.3 or box.size.y > 300.0 or box.size.x > attach_max_size or box.size.z > attach_max_size:
 			continue
-		if _attach_excluded(n):
-			continue
-		var box := _node_world_aabb(n)
-		if box.size.x < 0.3 or box.size.z < 0.3 or box.size.y > 300.0:
-			continue
-		var cx := box.position.x + box.size.x * 0.5
-		var cz := box.position.z + box.size.z * 0.5
-		var ex := box.size.x * 0.5 + attach_margin
-		var ez := box.size.z * 0.5 + attach_margin
+		# The raised patch: the object's footprint plus the margin, stretched out to the lines of the ground's own mesh grid.
+		# Every triangle that touches the object then has all its corners raised, so none of them slopes away underneath it.
+		var x0 := box.position.x - attach_margin
+		var x1 := box.end.x + attach_margin
+		var z0 := box.position.z - attach_margin
+		var z1 := box.end.z + attach_margin
+		if attach_snap_to_grid:
+			var cell := chunk_size / float(maxi(chunk_resolution, 2))
+			var off := fposmod(-chunk_size * 0.5, cell)       # the grid lines sit at off + k * cell
+			x0 = floorf((x0 - off) / cell) * cell + off - 0.01
+			x1 = ceilf((x1 - off) / cell) * cell + off + 0.01
+			z0 = floorf((z0 - off) / cell) * cell + off - 0.01
+			z1 = ceilf((z1 - off) / cell) * cell + off + 0.01
+		var cx := (x0 + x1) * 0.5
+		var cz := (z0 + z1) * 0.5
+		var ex := (x1 - x0) * 0.5
+		var ez := (z1 - z0) * 0.5
 		var bottom := box.position.y
-		# The object is floating only if the ground is below its bottom everywhere under it (centre and corners).
-		var top_ground := _natural_height(cx, cz)
-		for sx in [-1.0, 1.0]:
-			for sz in [-1.0, 1.0]:
-				top_ground = maxf(top_ground, _natural_height(cx + sx * ex, cz + sz * ez))
-		var gap := bottom - top_ground
-		if gap < attach_min_gap or gap > attach_max_gap:
+		# The ground is raised if it is below the bottom of the object ANYWHERE under it (so an object resting on the ground on one
+		# side but hanging over a dip on the other still gets the dip filled). It is skipped if the ground is already at the bottom
+		# everywhere (it is just resting), or if even the highest ground under it is far below (something that SHOULD float).
+		var lo_g := INF
+		var hi_g := -INF
+		for gi in 6:
+			for gj in 6:
+				var gh := _natural_height(box.position.x + box.size.x * float(gi) / 5.0, box.position.z + box.size.z * float(gj) / 5.0)
+				lo_g = minf(lo_g, gh)
+				hi_g = maxf(hi_g, gh)
+		if bottom - lo_g < attach_min_gap or bottom - hi_g > attach_max_gap:
 			continue
-		out.append_array(PackedFloat32Array([cx, cz, ex, ez, bottom - 0.02, maxf(attach_blend, 0.1)]))   # a hair below the bottom so they overlap, no gap
+		out.append_array(PackedFloat32Array([cx, cz, ex, ez, bottom + attach_embed, maxf(attach_blend, 0.1)]))   # a little way into the object, so the two overlap and no gap is left
 		count += 1
 	_anchors = out
 	return count
 
 
+## True if a mesh and a collision shape sit in the same spot: they overlap in height, and their footprints overlap by at least
+## attach_overlap of the smaller one. (So a huge floor mesh doesn't count as "the same spot" as a small crate.)
+func _same_spot(shape_box: AABB, mesh_box: AABB) -> bool:
+	var m := 0.3
+	if shape_box.position.y > mesh_box.end.y + m or mesh_box.position.y > shape_box.end.y + m:
+		return false
+	var ox := minf(shape_box.end.x, mesh_box.end.x) - maxf(shape_box.position.x, mesh_box.position.x)
+	var oz := minf(shape_box.end.z, mesh_box.end.z) - maxf(shape_box.position.z, mesh_box.position.z)
+	if ox <= 0.0 or oz <= 0.0:
+		return false
+	var smaller := minf(shape_box.size.x * shape_box.size.z, mesh_box.size.x * mesh_box.size.z)
+	return ox * oz >= attach_overlap * maxf(smaller, 0.0001)
+
+
+## The world-space box around one collision shape.
+func _shape_world_aabb(cs: CollisionShape3D) -> AABB:
+	var sh := cs.shape
+	var local := AABB()
+	if sh is BoxShape3D:
+		var sz := (sh as BoxShape3D).size
+		local = AABB(-sz * 0.5, sz)
+	elif sh is SphereShape3D:
+		var r := (sh as SphereShape3D).radius
+		local = AABB(Vector3(-r, -r, -r), Vector3(r, r, r) * 2.0)
+	elif sh is CapsuleShape3D:
+		var c := sh as CapsuleShape3D
+		local = AABB(Vector3(-c.radius, -c.height * 0.5, -c.radius), Vector3(c.radius * 2.0, c.height, c.radius * 2.0))
+	elif sh is CylinderShape3D:
+		var y := sh as CylinderShape3D
+		local = AABB(Vector3(-y.radius, -y.height * 0.5, -y.radius), Vector3(y.radius * 2.0, y.height, y.radius * 2.0))
+	else:
+		var dm := sh.get_debug_mesh()
+		if dm == null:
+			return AABB()
+		local = dm.get_aabb()
+	return cs.global_transform * local
+
+
+## Things the ground must NOT rise to meet: you, enemies, trees, anything that moves, and the terrain / far ground themselves.
 func _attach_excluded(n: Node) -> bool:
 	var p := n
 	while p != null:
 		if p == self or p.is_in_group("player") or p.is_in_group("enemy") or p.is_in_group("no_terrain_attach"):
+			return true
+		if p.has_method("is_blocked_at") or p.get("far_enabled") != null:   # the tree script and the distant-ground script
+			return true
+		if p.is_in_group("terrain_attach"):
+			return false                                    # forced in, even if it is under a mover
+		var low := String(p.name).to_lower()
+		if p.is_in_group("tree") or p.is_in_group("trees") or low.contains("tree") or low.contains("sakura"):
+			return true
+		if p is RigidBody3D or p is CharacterBody3D:        # things that move
 			return true
 		p = p.get_parent()
 	return false
@@ -370,25 +512,36 @@ func _rebuild_rect(r: Rect2) -> void:
 
 
 ## Each square slot of the world (mountain_spacing metres wide) may hold ONE mountain, decided by the seed alone,
-## so the same mountain is always in the same place. Returns Vector4(x, z, radius, height); height 0 = no mountain.
-func _mountain_at(cell: Vector2i) -> Vector4:
+## so the same mountain is always in the same place. Returns [x, z, radius, height, kind, cos angle, sin angle, steps]; an empty
+## array means no mountain. kind: 0 = peak, 1 = crag, 2 = mesa (flat top, steep walls), 3 = terraced cliffs, 4 = one-sided cliff.
+func _mountain_at(cell: Vector2i) -> PackedFloat32Array:
 	_mtn_mutex.lock()
 	if _mtn_cells.has(cell):
-		var cached: Vector4 = _mtn_cells[cell]
+		var cached: PackedFloat32Array = _mtn_cells[cell]
 		_mtn_mutex.unlock()
 		return cached
 	_mtn_mutex.unlock()
 
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(Vector3i(_seed, cell.x, cell.y))
-	var res := Vector4.ZERO
+	var res := PackedFloat32Array()
 	if rng.randf() < mountain_amount:
 		var mx := (cell.x + rng.randf_range(0.25, 0.75)) * mountain_spacing
 		var mz := (cell.y + rng.randf_range(0.25, 0.75)) * mountain_spacing
 		var radius := mountain_radius * rng.randf_range(0.7, 1.2)
-		var height := mountain_height * rng.randf_range(0.6, 1.0)
+		var v := mountain_height_variation
+		var height := mountain_height * rng.randf_range(lerpf(0.8, 0.3, v), lerpf(1.0, 1.35, v))
+		var wall_roll := rng.randf()
+		var type_roll := rng.randf()
+		var angle := rng.randf() * TAU
+		var steps := float(rng.randi_range(3, 5))
+		var kind := 0
+		if wall_roll < mountain_wall_chance:
+			kind = 2 if type_roll < 0.34 else (3 if type_roll < 0.67 else 4)
+		else:
+			kind = 1 if type_roll < 0.3 else 0
 		if sqrt(mx * mx + mz * mz) > radius + spawn_flat_radius * 2.0:   # never on top of the spawn area
-			res = Vector4(mx, mz, radius, height)
+			res = PackedFloat32Array([mx, mz, radius, height, float(kind), cos(angle), sin(angle), steps])
 	_mtn_mutex.lock()
 	_mtn_cells[cell] = res
 	_mtn_mutex.unlock()
@@ -725,9 +878,9 @@ func _update_chunks() -> void:
 				continue
 			var wanted := true
 			if planes.size() > 0 and dist2 > near_r * near_r:
-				var centre := Vector3(key.x * chunk_size, mountain_height * 0.3, key.y * chunk_size)
+				var centre := Vector3(key.x * chunk_size, mountain_height * 0.4, key.y * chunk_size)
 				for pl in planes:
-					if (pl as Plane).distance_to(centre) > sphere + mountain_height * 0.6:   # outside one side of the view (the extra covers tall mountains)
+					if (pl as Plane).distance_to(centre) > sphere + mountain_height * 0.8:   # outside one side of the view (the extra covers tall mountains)
 						wanted = false
 						break
 			if wanted:

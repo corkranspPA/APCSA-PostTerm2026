@@ -380,6 +380,11 @@ var was_on_floor := false
 @export var wall_cling_max_slide_speed := 2.0
 @export var wall_cling_fov := 88.0
 
+@export var wall_cling_move_speed := 4.0      # how fast you shuffle sideways along the wall while clinging
+@export var wall_cling_climb_speed := 3.0     # how fast you climb up (forward key) or down (back key) the wall
+@export var wall_cling_stick := 3.0           # a gentle push into the wall, so you stay on curved or uneven cliffs
+@export var wall_cling_lose_time := 0.15      # seconds without touching the wall before you let go (the wall's edge, the top of a cliff)
+var _cling_lost := 0.0
 var is_wall_clinging := false
 var wall_cling_normal := Vector3.ZERO
 
@@ -673,35 +678,11 @@ func _physics_process(delta: float) -> void:
 
 	# "and not is_dashing" — a roll no longer gets frozen in place by wall cling.
 	if is_on_wall() and not is_on_floor() and not is_wall_clinging and not is_sliding and not is_slamming and not is_dashing and velocity.y < 0.0:
-		var space_state = get_world_3d().direct_space_state
-		var ray = PhysicsRayQueryParameters3D.create(
-			global_position,
-			global_position + (-wall_cling_normal if wall_cling_normal != Vector3.ZERO else -transform.basis.z) * 0.6
-		)
-		ray.exclude = [self]
-		var ray_chest = PhysicsRayQueryParameters3D.create(
-			global_position + Vector3.UP * 0.5,
-			global_position + Vector3.UP * 0.5 + (-get_wall_normal()) * 0.6
-		)
-		ray_chest.exclude = [self]
-		var ray_waist = PhysicsRayQueryParameters3D.create(
-			global_position + Vector3.DOWN * 0.3,
-			global_position + Vector3.DOWN * 0.3 + (-get_wall_normal()) * 0.6
-		)
-		ray_waist.exclude = [self]
-
-		var result_center = space_state.intersect_ray(ray)
-		var result_chest = space_state.intersect_ray(ray_chest)
-		var result_waist = space_state.intersect_ray(ray_waist)
-
-		var hit_center = not result_center.is_empty() and not (result_center.collider and result_center.collider.is_in_group("enemy"))
-		var hit_chest = not result_chest.is_empty() and not (result_chest.collider and result_chest.collider.is_in_group("enemy"))
-		var hit_waist = not result_waist.is_empty() and not (result_waist.collider and result_waist.collider.is_in_group("enemy"))
-
-		var hits = int(hit_center) + int(hit_chest) + int(hit_waist)
-		if hits >= 2:
+		var cling_n := _find_cling_wall()
+		if cling_n != Vector3.ZERO:
 			is_wall_clinging = true
-			wall_cling_normal = get_wall_normal()
+			wall_cling_normal = cling_n
+			_cling_lost = 0.0
 
 	if is_wall_clinging and is_on_floor():
 		is_wall_clinging = false
@@ -783,7 +764,14 @@ func _physics_process(delta: float) -> void:
 			_end_dash()
 
 	elif is_wall_clinging:
-		velocity = Vector3.ZERO
+		# Move freely over the wall: left / right slide along it, forward climbs, back climbs down. The gentle push
+		# into the wall keeps you touching it (the cling is re-checked after the move, see below).
+		var tangent := Vector3.UP.cross(wall_cling_normal)
+		tangent = tangent.normalized() if tangent.length() > 0.01 else Vector3.ZERO
+		var world_in := transform.basis * Vector3(input_dir.x, 0.0, input_dir.y)
+		velocity = tangent * world_in.dot(tangent) * wall_cling_move_speed \
+			+ Vector3.UP * (-input_dir.y) * wall_cling_climb_speed \
+			- wall_cling_normal * wall_cling_stick
 
 	elif is_slamming:
 		velocity.x = move_toward(velocity.x, 0.0, slam_air_drag * delta)
@@ -970,6 +958,17 @@ func _physics_process(delta: float) -> void:
 	was_on_floor = is_on_floor()
 
 	move_and_slide()
+
+	# Clinging: follow the wall's shape as you move along it, and let go once you are no longer touching it.
+	if is_wall_clinging:
+		var still_n := _find_cling_wall()
+		if still_n != Vector3.ZERO:
+			wall_cling_normal = still_n
+			_cling_lost = 0.0
+		else:
+			_cling_lost += delta
+			if _cling_lost >= wall_cling_lose_time:
+				is_wall_clinging = false
 
 	# Landed before finishing an air roll. If there was enough airtime to finish it, you botch it and tumble.
 	# If the hop was too short to ever finish it, the roll simply ends on landing and you keep your speed.
@@ -2411,6 +2410,27 @@ func stop_slide():
 		# Only go back to sprinting if there's stamina for it (so a slide that ends while you're gassed
 		# doesn't put you straight back into a sprint that would be cut off again).
 		is_sprinting = stamina > min_stamina_to_sprint
+
+
+## The horizontal normal of a steep wall the body bumped into on its last move (zero if none). Floors, ceilings and enemies don't count.
+func _find_cling_wall() -> Vector3:
+	for i in get_slide_collision_count():
+		var c := get_slide_collision(i)
+		var n := c.get_normal()
+		if n.y > 0.7 or n.y < -0.3:
+			continue                                   # a floor / gentle slope, or a ceiling
+		var col := c.get_collider() as Node
+		if col != null and col.is_in_group("enemy"):
+			continue
+		n.y = 0.0
+		if n.length() > 0.1:
+			return n.normalized()
+	if get_slide_collision_count() == 0 and is_on_wall():
+		var wn := get_wall_normal()
+		wn.y = 0.0
+		if wn.length() > 0.1:
+			return wn.normalized()
+	return Vector3.ZERO
 
 
 func can_stand_up() -> bool:
