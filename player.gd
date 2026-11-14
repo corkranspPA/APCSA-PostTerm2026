@@ -237,6 +237,7 @@ var restore_camera_pitch := false
 @export var burrow_look_range := 45.0         # NEW: how far away the spot you look at can be (the portal opens where your view hits the ground / a wall)
 @export var burrow_wall_reach := 1.3         # NEW: how close you must be to a wall (and facing it) for E to go through it
 @export var burrow_shadow_enabled := true   # NEW: dark pools, wisps and a shadow streak
+@export var burrow_into_walls := true       # NEW: E while clinging to (or touching) a wall in the air phases you into the wall, instead of the ground
 
 var is_burrowing := false
 var burrow_phase := 0                       # 1 = sinking, 2 = shadow travel, 3 = rising
@@ -256,6 +257,8 @@ var burrow_wall_fly := 0.0                  # NEW: horizontal distance from the 
 var burrow_travel_to := Vector3.ZERO        # NEW: where the underground travel ends (under the far face for a wall)
 var burrow_front_flip := false              # NEW: true when you are coming out of a wall (front flip instead of backflip)
 var burrow_crossed := false                 # NEW: true once you have gone through the ground surface on the way in
+var burrow_enter_wall := false              # NEW: this burrow started by phasing into a wall (not by sinking into the ground)
+var burrow_enter_dir := Vector3.ZERO        # NEW: the direction you phase into the wall (straight into it)
 var shadow_cover_target := 0.0              # NEW: where the black screen wants to be; the real value eases toward it
 var shadow_cover_cur := 0.0
 var _void_env: Environment = null            # NEW: solid-black camera environment used while the screen is (nearly) black
@@ -616,10 +619,15 @@ func _physics_process(delta: float) -> void:
 	if is_burrowing:
 		_burrow_physics(delta)
 		return
-	if burrow_enabled and Input.is_action_just_pressed("burrow") and burrow_cooldown_timer <= 0.0 and is_on_floor():
-		_start_burrow()
-		if is_burrowing:
-			return
+	if burrow_enabled and Input.is_action_just_pressed("burrow") and burrow_cooldown_timer <= 0.0:
+		# On the ground: sink into it. In the air against a wall (clinging or touching it): phase into the wall.
+		var burrow_wall := Vector3.ZERO
+		if not is_on_floor() and burrow_into_walls:
+			burrow_wall = _burrow_wall_normal()
+		if is_on_floor() or burrow_wall != Vector3.ZERO:
+			_start_burrow(burrow_wall)
+			if is_burrowing:
+				return
 
 	# Rolling into a wall kicks you off it (checked before wall-cling so cling can't steal the roll).
 	if is_dashing and is_rolling and roll_wall_bounce and is_on_wall():
@@ -994,7 +1002,16 @@ func _physics_process(delta: float) -> void:
 # -------------------------
 # BURROW (E) — NEW
 # -------------------------
-func _start_burrow() -> void:
+## The horizontal normal of the wall you are clinging to or touching in the air (zero if none).
+func _burrow_wall_normal() -> Vector3:
+	if is_wall_clinging and wall_cling_normal != Vector3.ZERO:
+		return wall_cling_normal
+	if is_on_wall():
+		return _find_cling_wall()
+	return Vector3.ZERO
+
+
+func _start_burrow(wall_n: Vector3 = Vector3.ZERO) -> void:
 	# Up against a wall (and facing it): shadow travel goes THROUGH the wall and comes out the far side with a front flip.
 	# The portal opens where you are LOOKING on the collision (ground or wall); the shadow never passes through walls.
 	var exit := _burrow_pick_exit()
@@ -1006,6 +1023,17 @@ func _start_burrow() -> void:
 	burrow_look = exit["look"]
 	burrow_start = global_position
 	burrow_surface_y = _burrow_surface_height()
+	burrow_enter_wall = wall_n != Vector3.ZERO
+	var enter_point := burrow_start
+	if burrow_enter_wall:
+		burrow_enter_dir = -wall_n
+		burrow_surface_y = burrow_start.y - 6.0          # (no ground to hold the camera at: you are going into a wall)
+		# Where on the wall you go in: a ray from chest height straight into it.
+		var wq := PhysicsRayQueryParameters3D.create(burrow_start + Vector3.UP * 0.9, burrow_start + Vector3.UP * 0.9 + burrow_enter_dir * 2.0)
+		wq.exclude = [get_rid()]
+		wq.collision_mask = weapon_clip_mask
+		var wh := get_world_3d().direct_space_state.intersect_ray(wq)
+		enter_point = (wh.position as Vector3) if not wh.is_empty() else burrow_start + Vector3.UP * 0.9 + burrow_enter_dir * 0.5
 	burrow_wall_exit = exit.get("wall", false)
 	burrow_travel_to = burrow_exit
 	if burrow_wall_exit:
@@ -1046,8 +1074,13 @@ func _start_burrow() -> void:
 
 	# Shadow effect: a dark pool opens under your feet while you leap, and you dive into it.
 	if burrow_shadow_enabled:
-		_spawn_shadow_pool(Vector3(burrow_start.x, burrow_surface_y + burrow_shadow_lift, burrow_start.z), 0.25, 1.3, burrow_sink_time * burrow_time_scale, 0.15, 0.5, get_floor_normal())
-		_spawn_shadow_burst(burrow_start, 22)
+		if burrow_enter_wall:
+			# An upright dark portal opens on the wall where you grab it, and you dive in.
+			_spawn_shadow_pool(enter_point - burrow_enter_dir * 0.06, 0.25, 1.3, burrow_sink_time * burrow_time_scale, 0.15, 0.5, -burrow_enter_dir)
+			_spawn_shadow_burst(enter_point - burrow_enter_dir * 0.3, 22)
+		else:
+			_spawn_shadow_pool(Vector3(burrow_start.x, burrow_surface_y + burrow_shadow_lift, burrow_start.z), 0.25, 1.3, burrow_sink_time * burrow_time_scale, 0.15, 0.5, get_floor_normal())
+			_spawn_shadow_burst(burrow_start, 22)
 	burrow_started.emit()
 
 
@@ -1061,12 +1094,23 @@ func _burrow_physics(delta: float) -> void:
 	if burrow_phase == 1:
 		# Sinking: fall face first into the ground (no hop, no flip).
 		var t := 1.0 - clampf(burrow_timer / maxf(burrow_sink_time, 0.01), 0.0, 1.0)
-		global_position = burrow_start + Vector3.DOWN * burrow_depth * (t * t)
-		camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees) * pow(t, 1.5)
-		_burrow_fov(normal_fov - 14.0, delta)
-		_pin_camera_to_surface(burrow_surface_y)             # the camera stops here, on the shadow at the found ground height
-		var touch_cover := _eye_cover(burrow_surface_y, burrow_camera_hold + 0.11, burrow_camera_hold + 0.01)
-		_set_shadow_cover(touch_cover, touch_cover >= 0.99)   # black the instant the camera touches the surface (no easing)
+		if burrow_enter_wall:
+			# Phasing into a wall: you turn to face it and sink straight into it, the view going dark as your eyes reach the surface.
+			global_position = burrow_start + burrow_enter_dir * burrow_depth * (t * t)
+			rotation.y = lerp_angle(rotation.y, atan2(-burrow_enter_dir.x, -burrow_enter_dir.z), 1.0 - exp(-12.0 * delta))
+			camera.rotation.x = base_camera_rot_x
+			_burrow_fov(normal_fov - 14.0, delta)
+			burrow_cam_lift = 0.0
+			_update_head_pivot()
+			var wall_dark := smoothstep(0.1, 0.9, t * t * burrow_depth)
+			_set_shadow_cover(wall_dark, wall_dark >= 0.99)
+		else:
+			global_position = burrow_start + Vector3.DOWN * burrow_depth * (t * t)
+			camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees) * pow(t, 1.5)
+			_burrow_fov(normal_fov - 14.0, delta)
+			_pin_camera_to_surface(burrow_surface_y)             # the camera stops here, on the shadow at the found ground height
+			var touch_cover := _eye_cover(burrow_surface_y, burrow_camera_hold + 0.11, burrow_camera_hold + 0.01)
+			_set_shadow_cover(touch_cover, touch_cover >= 0.99)   # black the instant the camera touches the surface (no easing)
 		if not burrow_crossed and t * t * burrow_depth > 0.3:
 			# You've gone down through the surface: the gun disappears.
 			burrow_crossed = true
@@ -1081,18 +1125,22 @@ func _burrow_physics(delta: float) -> void:
 		var t2 := 1.0 - clampf(burrow_timer / maxf(burrow_travel_time, 0.01), 0.0, 1.0)
 		var te := t2 * t2 * (3.0 - 2.0 * t2)
 		var along := burrow_start.lerp(burrow_travel_to, te)
-		global_position = along + Vector3.DOWN * burrow_depth
+		var under := Vector3.DOWN * burrow_depth
+		if burrow_enter_wall:
+			under = (burrow_enter_dir * burrow_depth).lerp(under, smoothstep(0.0, 0.5, t2))   # from inside the wall, down to travelling level
+		global_position = along + under
+		var dive_r := deg_to_rad(burrow_dive_degrees) * (smoothstep(0.0, 0.5, t2) if burrow_enter_wall else 1.0)
 		_pin_camera_to_surface(lerpf(burrow_surface_y, burrow_travel_to.y, te))
 		rotation.y = lerp_angle(rotation.y, burrow_yaw, 1.0 - exp(-14.0 * delta))
 		_burrow_fov(normal_fov + 26.0, delta)
 		# Stay tipped forward, then start winding the flip up gently (it speeds up from standing still, so the exit has no jolt).
 		if burrow_wall_exit:
 			# Leaving a wall HEAD FIRST: level out from the dive so you shoot out of the wall head-first, looking where you're flying.
-			camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees) * (1.0 - smoothstep(0.0, 0.8, t2))
+			camera.rotation.x = base_camera_rot_x - dive_r * (1.0 - smoothstep(0.0, 0.8, t2))
 		elif burrow_front_flip:
-			camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees)   # keeps tipping forward: the front flip carries straight on from the dive
+			camera.rotation.x = base_camera_rot_x - dive_r   # keeps tipping forward: the front flip carries straight on from the dive
 		else:
-			camera.rotation.x = base_camera_rot_x - deg_to_rad(burrow_dive_degrees) + deg_to_rad(burrow_preroll_degrees) * smoothstep(0.45, 1.0, t2)
+			camera.rotation.x = base_camera_rot_x - dive_r + deg_to_rad(burrow_preroll_degrees) * smoothstep(0.45, 1.0, t2)
 		_set_shadow_cover(1.0)   # completely black while travelling
 		_update_shadow_travel(along)
 		if burrow_timer <= 0.0:

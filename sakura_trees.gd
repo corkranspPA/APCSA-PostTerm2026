@@ -15,6 +15,8 @@ extends Node3D
 ##    engine switches between the levels by distance, so far-away trees are cheap and nothing is drawn beyond draw_distance.
 ##  - Where the trees stand is worked out from the terrain seed alone (no saving needed): the same seed gives the same
 ##    forest, and a new random world gets a new forest. Placement follows the terrain's height_at().
+##  - Detail levels dissolve into each other (lod_fade) instead of popping, and the trees of a cell are handed to the GPU as one
+##    ready-made block of numbers (no per-tree work when a level is added), shared by all its levels.
 ##  - At most one cell is built per frame, so walking never causes a hitch.
 ##  - Trunk collision only exists close to you (and close to enemies), and is removed again when you move away.
 
@@ -59,6 +61,8 @@ extends Node3D
 @export var lod0_distance := 40.0                      # full-detail trees up to here (the costly ones, so keep this small)
 @export var lod1_distance := 130.0                     # medium-detail trees up to here, then the cheapest version
 @export var lod_overlap := 12.0                        # both levels show for this many metres when switching (hides the pop)
+@export var lod_fade := true                           # levels dissolve into each other instead of popping (needs the Forward+ or Mobile renderer; harmless otherwise)
+@export var lod_fade_margin := 6.0                     # how many metres the dissolve takes (keep this at or below lod_overlap)
 @export var lod0_casts_shadows := true                 # near trees cast shadows
 @export var lod1_casts_shadows := false                # medium trees cast shadows (nicer, but costs more)
 @export var cells_per_frame := 1                       # new cells built per frame (raise for faster filling, lower if it stutters)
@@ -89,7 +93,7 @@ var _n_forest: FastNoiseLite
 var _logic_ready := false
 var _ready_done := false
 
-var _cells := {}                                       # Vector2i -> { "n", "xf", "scl", "p2" } (where the trees are; cheap)
+var _cells := {}                                       # Vector2i -> { "n", "buf", "scl", "p2" } (where the trees are; cheap)
 var _built := {}                                       # Vector2i -> Node3D holding the cell's MultiMeshes (null for a cell with no trees)
 var _bodies := {}                                      # Vector2i -> StaticBody3D with the trunk collision
 var _build_queue: Array[Vector2i] = []
@@ -295,11 +299,12 @@ func _dist2(key: Vector2i, pos: Vector3) -> float:
 func _get_cell(key: Vector2i) -> Dictionary:
 	if _cells.has(key):
 		return _cells[key]
-	var xf := []
+	var buf := PackedFloat32Array()                      # one MultiMesh transform (12 numbers) per tree, relative to the cell centre
 	var scl := PackedFloat32Array()
 	var p2 := PackedVector2Array()
 	var rng := RandomNumberGenerator.new()
 	var gn := maxi(grid_per_cell, 1)
+	var cc := _cell_centre(key)
 
 	# The marked blockers are looked up once per cell (not once per tree).
 	var bpos := PackedVector2Array()
@@ -355,10 +360,13 @@ func _get_cell(key: Vector2i) -> Dictionary:
 				continue
 			var basis := Basis(Vector3.UP, yaw) * Basis.from_scale(Vector3(s, s * hr, s))
 			var sink := 0.1 + slope_t * 0.8 * s                      # sunk a touch (more on a slope) so the roots meet the ground
-			xf.append(Transform3D(basis, Vector3(x, h - sink, z)))
+			var r0 := Vector3(basis.x.x, basis.y.x, basis.z.x)      # the rows of the basis (MultiMesh wants them row by row)
+			var r1 := Vector3(basis.x.y, basis.y.y, basis.z.y)
+			var r2 := Vector3(basis.x.z, basis.y.z, basis.z.z)
+			buf.append_array(PackedFloat32Array([r0.x, r0.y, r0.z, x - cc.x, r1.x, r1.y, r1.z, h - sink, r2.x, r2.y, r2.z, z - cc.z]))
 			scl.append(s)
 			p2.append(Vector2(x, z))
-	var d := { "n": xf.size(), "xf": xf, "scl": scl, "p2": p2 }
+	var d := { "n": scl.size(), "buf": buf, "scl": scl, "p2": p2 }
 	if _physics_ready:                                  # (before the physics world is ready the result isn't kept, so it is redone later)
 		_cells[key] = d
 	return d
@@ -544,16 +552,17 @@ func _build_cell(key: Vector2i) -> void:
 	_add_lods(key, _lods_needed(key, _focus()))
 
 
-## Adds the MultiMeshes for the given detail levels to an already built cell.
+## Adds the MultiMeshes for the given detail levels to an already built cell. All levels use the same ready-made block of
+## transforms, so adding a level is one copy instead of a loop over every tree.
 func _add_lods(key: Vector2i, mask: int) -> void:
 	var holder = _built.get(key)
 	if holder == null or not is_instance_valid(holder):
 		return
 	var d := _get_cell(key)
 	var n: int = d["n"]
-	var centre := _cell_centre(key)
-	var xfs: Array = d["xf"]
+	var buf: PackedFloat32Array = d["buf"]
 	var casts := [lod0_casts_shadows, lod1_casts_shadows, false]
+	var fm := minf(lod_fade_margin, lod_overlap)
 	for lod in 3:
 		if (mask & (1 << lod)) == 0:
 			continue
@@ -561,16 +570,18 @@ func _add_lods(key: Vector2i, mask: int) -> void:
 		mm.transform_format = MultiMesh.TRANSFORM_3D
 		mm.mesh = _meshes[lod]
 		mm.instance_count = n
-		for i in n:
-			var t: Transform3D = xfs[i]
-			t.origin -= centre
-			mm.set_instance_transform(i, t)
+		mm.buffer = buf
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if casts[lod] else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 		mmi.visibility_range_begin = _lod_begins[lod]
 		mmi.visibility_range_end = _lod_ends[lod]
+		if lod_fade and fm > 0.0:
+			# Each level dissolves in and out over a few metres (the ranges overlap, so there is never a gap or a pop).
+			mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+			mmi.visibility_range_begin_margin = fm if lod > 0 else 0.0
+			mmi.visibility_range_end_margin = fm
 		(holder as Node3D).add_child(mmi)
 	_lod_mask[key] = int(_lod_mask.get(key, 0)) | mask
 
@@ -594,7 +605,7 @@ func _build_body(key: Vector2i) -> void:
 	add_child(body)
 	var centre := _cell_centre(key)
 	body.global_position = centre
-	var xfs: Array = d["xf"]
+	var buf: PackedFloat32Array = d["buf"]
 	var scl: PackedFloat32Array = d["scl"]
 	for i in n:
 		var s := scl[i]
@@ -603,8 +614,7 @@ func _build_body(key: Vector2i) -> void:
 		sh.height = trunk_height * s
 		var cs := CollisionShape3D.new()
 		cs.shape = sh
-		var o: Vector3 = (xfs[i] as Transform3D).origin
-		cs.position = Vector3(o.x - centre.x, o.y + sh.height * 0.5, o.z - centre.z)
+		cs.position = Vector3(buf[i * 12 + 3], buf[i * 12 + 7] + sh.height * 0.5, buf[i * 12 + 11])   # (already relative to the cell centre)
 		body.add_child(cs)
 	_bodies[key] = body
 

@@ -54,21 +54,26 @@ var look_target := Vector3.ZERO           # world position of whoever shot it
 # =========================
 # ATTACK (telegraphed lunge)
 # =========================
-@export var attack_range := 3.2          # CHANGED (was 2.6): starts an attack when the player is this close (flat distance)
+@export var attack_range := 2.4          # CHANGED (was 2.6): starts an attack when the player is this close (flat distance)
 @export var attack_windup := 0.4         # CHANGED (was 0.55): telegraph time — enemy turns orange and stops. Dodge window!
-@export var attack_lunge_speed := 16.0   # how fast the lunge is
-@export var attack_lunge_time := 0.25    # CHANGED (was 0.2): how long the lunge lasts
+@export var attack_lunge_speed := 2.5    # the little step forward during the claw swipe (it no longer lunges across the room)
+@export var attack_lunge_time := 0.3    # CHANGED (was 0.2): how long the lunge lasts
 @export var attack_recover := 0.45       # CHANGED (was 0.6): vulnerable recovery after the lunge
 @export var attack_cooldown := 0.6       # CHANGED (was 1.2): extra wait before it can attack again
 @export var attack_damage := 20.0
-@export var attack_hit_radius := 2.2     # CHANGED (was 1.8): how close the player must be during the lunge to get hit
+@export var attack_hit_radius := 2.6     # CHANGED (was 1.8): how close the player must be during the lunge to get hit
 @export var attack_knockback := 9.0
 
-enum AttackPhase { NONE, WINDUP, LUNGE, RECOVER }
+@export var sprint_speed := 8.0          # NEW: speed when it is running at you from far away
+@export var sprint_min_distance := 4.5    # NEW: it sprints while you are further than this, then slows to a walk to swipe
+@export var swipe_hit_time := 0.4         # NEW: how far through the swipe (0-1) the claws land
+enum AttackPhase { NONE, WINDUP, LUNGE, RECOVER }   # LUNGE is now the claw swipe
 var attack_phase: AttackPhase = AttackPhase.NONE
 var attack_timer := 0.0
 var attack_cooldown_timer := 0.0
 var attack_hit_landed := false
+var attack_right := true                  # which arm swipes (alternates)
+var _sprinting := false
 var lunge_dir := Vector3.ZERO
 var windup_material: StandardMaterial3D = null
 
@@ -167,6 +172,39 @@ var player: Node3D = null
 var last_known_position: Vector3 = Vector3.ZERO
 var can_see_player := false
 
+# =========================
+# GOBLIN MODEL (replaces the old blob; walks, runs, claws, flinches and falls over by moving the rig's bones from code)
+# =========================
+@export_group("Goblin model")
+@export var goblin_enabled := true                 # off = the old blob model, exactly as before
+@export var goblin_scene_path := "res://goblin.glb"
+@export var goblin_height_scale := 1.0             # 1.0 = the goblin is exactly as tall as the enemy's collision capsule
+@export var goblin_arm_down_degrees := 68.0        # how far the arms hang down from the model's T-pose (90 = straight down)
+@export var goblin_gait_rate := 5.0                # how fast the legs cycle for a given speed (raise if the feet slide)
+@export var goblin_lean_strength := 1.0            # how much the body leans into its movement and rocks back in a wind-up
+@export var goblin_squash_strength := 0.3          # how much of the old jelly squash-and-stretch is kept (0 = none)
+
+const _GOBLIN_HEIGHT := 1.41                       # the goblin's height in its own file (metres)
+static var _goblin_mat_shared: BaseMaterial3D = null
+
+var _model_pivot: Node3D = null                    # feet-level pivot: lean, squash, and the death fall
+var _skel: Skeleton3D = null
+var _goblin_mi: MeshInstance3D = null
+var _feet_local := Vector3.ZERO
+var _model_scale := 1.0
+var _bones := {}                                   # "thigh_l" -> bone index
+var _flash_overlay: StandardMaterial3D = null
+var _windup_overlay: StandardMaterial3D = null
+var _g_gait := 0.0
+var _g_move := 0.0
+var _g_idle := 0.0
+var _g_head := 0.0
+var _g_hit := 0.0
+var _g_sprint := 0.0
+var _g_dead := false
+var _g_fall_t := 0.0
+var _g_fall_sign := 1.0
+
 func _ready() -> void:
 	# The player's slam + wall-cling code look for this group.
 	add_to_group("enemy")
@@ -203,6 +241,8 @@ func _ready() -> void:
 	if $Facebox:
 		$Facebox.collision_layer = 1 << (FACEBOX_LAYER - 1)
 		$Facebox.collision_mask = 0
+
+	_setup_goblin()
 
 func _physics_process(delta: float) -> void:
 	if player == null:
@@ -242,7 +282,9 @@ func _physics_process(delta: float) -> void:
 				if _flat_distance_to_player() <= attack_range and attack_cooldown_timer <= 0.0 and player.get("is_dead") != true:
 					_start_attack()
 				else:
-					_move_toward(player.global_position)
+					# Far away: sprint. Close: walk the last bit and swipe.
+					_sprinting = _flat_distance_to_player() > sprint_min_distance
+					_move_toward(player.global_position, sprint_speed if _sprinting else move_speed)
 			else:
 				# CHANGED: keep coming for a moment after losing sight instead of giving up straight away.
 				lost_sight_timer -= delta
@@ -363,10 +405,12 @@ func _is_terrain(col: Object) -> bool:
 # =========================
 # MOVEMENT
 # =========================
-func _move_toward(target: Vector3) -> void:
+func _move_toward(target: Vector3, speed: float = -1.0) -> void:
+	if speed < 0.0:
+		speed = move_speed
 	var dir = (target - global_position).normalized()
 	# Ramp up to speed instead of snapping to it, so it feels like it has weight.
-	var cur := Vector2(velocity.x, velocity.z).move_toward(Vector2(dir.x, dir.z) * move_speed, move_accel * get_physics_process_delta_time())
+	var cur := Vector2(velocity.x, velocity.z).move_toward(Vector2(dir.x, dir.z) * speed, move_accel * get_physics_process_delta_time())
 	velocity.x = cur.x
 	velocity.z = cur.y
 	var flat_dir = Vector3(dir.x, 0, dir.z)
@@ -393,6 +437,8 @@ func _start_attack() -> void:
 	attack_phase = AttackPhase.WINDUP
 	attack_timer = attack_windup
 	attack_hit_landed = false
+	attack_right = not attack_right
+	_sprinting = false
 	velocity.x = 0
 	velocity.z = 0
 	if not is_flashing:
@@ -419,9 +465,11 @@ func _process_attack(delta: float) -> void:
 				if not is_flashing:
 					_apply_base_materials()
 		AttackPhase.LUNGE:
-			velocity.x = lunge_dir.x * attack_lunge_speed
-			velocity.z = lunge_dir.z * attack_lunge_speed
-			if not attack_hit_landed and _player_in_hit_range():
+			var sp := 1.0 - clampf(attack_timer / maxf(attack_lunge_time, 0.01), 0.0, 1.0)
+			_face_position(player.global_position, 4.0, delta)   # the swipe follows you a little
+			velocity.x = lunge_dir.x * attack_lunge_speed * (1.0 - sp)
+			velocity.z = lunge_dir.z * attack_lunge_speed * (1.0 - sp)
+			if not attack_hit_landed and sp >= swipe_hit_time and _player_in_hit_range():
 				_deal_attack_damage()
 			attack_timer -= delta
 			if attack_timer <= 0.0:
@@ -473,6 +521,7 @@ func _apply_base_materials() -> void:
 	else:
 		mesh.set_surface_override_material(0, original_material)
 		face_mesh.set_surface_override_material(0, face_original_material)
+	_goblin_set_overlay()
 
 # =========================
 # WOBBLE
@@ -486,6 +535,8 @@ func _apply_wobble(delta: float) -> void:
 		wobble_time = 0.0
 		bob_offset = lerp(bob_offset, 0.0, 10.0 * delta)
 	_apply_jelly(delta)
+	if _model_pivot != null:
+		_goblin_animate(delta)
 
 
 ## Squash & stretch driven by a spring, so every change of shape overshoots and jiggles a little.
@@ -577,6 +628,7 @@ func take_damage(amount: float, hit_point: Vector3, shooter: Node) -> void:
 				if shot_angle > sight_angle:
 					deaf_timer = behind_shot_deaf_time
 	jelly_vel += Vector3(0.6, -1.0, 0.6) * hit_squash * 12.0   # jiggle when hit
+	_g_hit = 1.0                                               # the goblin flinches
 	_start_flash()
 	if health <= 0.0:
 		die()
@@ -586,6 +638,7 @@ func _start_flash() -> void:
 	flash_timer = flash_duration
 	mesh.set_surface_override_material(0, flash_material)
 	face_mesh.set_surface_override_material(0, flash_material)
+	_goblin_set_overlay()
 
 # =========================
 # DEATH
@@ -615,7 +668,10 @@ func die() -> void:
 	corpse_age = 0.0
 	_corpse_is_soft = false
 	var spawned := false
-	if limp_ragdoll and mesh.mesh:
+	if _model_pivot != null:
+		_goblin_death_begin(push)
+		spawned = true
+	if not spawned and limp_ragdoll and mesh.mesh:
 		spawned = _spawn_limp_corpse(push)
 	if not spawned and use_real_soft_body and mesh.mesh:
 		_corpse_is_soft = _spawn_soft_body_corpse(push)
@@ -892,6 +948,8 @@ func _update_corpse_jelly(delta: float) -> void:
 
 func _apply_fade(delta: float) -> void:
 	corpse_age += delta
+	if _g_dead:
+		_goblin_dead_update(delta)
 
 	if not _corpse_is_soft:
 		_update_corpse_jelly(delta)
@@ -904,6 +962,8 @@ func _apply_fade(delta: float) -> void:
 		death_material.albedo_color.a = alpha
 	for m in _limp_mats:
 		m.set_shader_parameter("alpha", alpha)
+	if _goblin_mi != null:
+		_goblin_mi.transparency = 1.0 - alpha
 
 func _respawn() -> void:
 	if _death_rb and is_instance_valid(_death_rb):
@@ -945,8 +1005,9 @@ func _respawn() -> void:
 	rotation = spawn_rotation
 
 	$CollisionShape3D.set_deferred("disabled", false)
-	mesh.visible = true
-	face_mesh.visible = true
+	mesh.visible = _model_pivot == null
+	face_mesh.visible = _model_pivot == null
+	_goblin_reset()
 	mesh.rotation = Vector3.ZERO
 	mesh.scale = mesh_base_scale
 	face_mesh.scale = face_base_scale
@@ -955,3 +1016,292 @@ func _respawn() -> void:
 	face_mesh.position.y = face_mesh_base_y
 	mesh.set_surface_override_material(0, original_material)
 	face_mesh.set_surface_override_material(0, face_original_material)
+
+
+# =========================
+# GOBLIN MODEL
+# =========================
+## Puts the goblin on the enemy, hides the old blob (its hit boxes and face box stay, so shooting works as before), and
+## finds the bones it will move.
+func _setup_goblin() -> void:
+	if not goblin_enabled:
+		return
+	var ps := load(goblin_scene_path) as PackedScene
+	if ps == null:
+		push_warning("enemy: couldn't load %s, keeping the old model. Put goblin.glb in your project (or fix goblin_scene_path)." % goblin_scene_path)
+		return
+	var inst := ps.instantiate()
+	for c in inst.get_children():
+		if String(c.name).begins_with("WGT-"):            # leftover rig widgets from Blender, nothing to see
+			c.free()
+	var skels := inst.find_children("*", "Skeleton3D", true, false)
+	if skels.size() > 0:
+		_skel = skels[0] as Skeleton3D
+	for m in inst.find_children("*", "MeshInstance3D", true, false):
+		if (m as MeshInstance3D).mesh != null:
+			_goblin_mi = m as MeshInstance3D
+			break
+	if _goblin_mi == null:
+		push_warning("enemy: %s has no mesh, keeping the old model." % goblin_scene_path)
+		inst.free()
+		_skel = null
+		return
+
+	# Where the feet are, and how big to make it: as tall as the collision capsule, so it fits the hit box.
+	var cap := $CollisionShape3D.shape as CapsuleShape3D
+	var height: float = cap.height if cap else 1.8
+	var col_pos: Vector3 = $CollisionShape3D.position
+	_feet_local = Vector3(col_pos.x, col_pos.y - height * 0.5, col_pos.z)
+	_model_scale = height * goblin_height_scale / _GOBLIN_HEIGHT
+
+	_model_pivot = Node3D.new()
+	_model_pivot.name = "GoblinPivot"
+	_model_pivot.position = _feet_local
+	_model_pivot.scale = Vector3.ONE * _model_scale
+	add_child(_model_pivot)
+	var facing := Node3D.new()                           # the goblin faces +Z in its file, the enemy faces -Z
+	facing.rotation.y = PI
+	_model_pivot.add_child(facing)
+	facing.add_child(inst)
+
+	mesh.visible = false
+	face_mesh.visible = false
+
+	# The imported material is "blend" with no depth writing, which sorts badly on a character. One shared fixed copy for all goblins.
+	var gm := _goblin_mi.get_active_material(0)
+	if gm is BaseMaterial3D:
+		if _goblin_mat_shared == null:
+			_goblin_mat_shared = (gm as BaseMaterial3D).duplicate() as BaseMaterial3D
+			_goblin_mat_shared.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS
+		_goblin_mi.set_surface_override_material(0, _goblin_mat_shared)
+	_goblin_mi.extra_cull_margin = 1.0                   # posed arms reach outside the model's resting box
+
+	# Red flash when hit and orange glow in the wind-up, laid over the goblin's own look.
+	_flash_overlay = StandardMaterial3D.new()
+	_flash_overlay.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_flash_overlay.albedo_color = Color(1.0, 0.05, 0.05, 0.6)
+	_flash_overlay.emission_enabled = true
+	_flash_overlay.emission = Color.RED
+	_flash_overlay.emission_energy_multiplier = 1.5
+	_windup_overlay = StandardMaterial3D.new()
+	_windup_overlay.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_windup_overlay.albedo_color = Color(1.0, 0.5, 0.05, 0.5)
+	_windup_overlay.emission_enabled = true
+	_windup_overlay.emission = Color(1.0, 0.45, 0.0)
+	_windup_overlay.emission_energy_multiplier = 2.0
+
+	if _skel != null:
+		var names := {
+			"thigh_l": "DEF-thigh.L", "thigh_r": "DEF-thigh.R", "shin_l": "DEF-shin.L", "shin_r": "DEF-shin.R",
+			"foot_l": "DEF-foot.L", "foot_r": "DEF-foot.R", "arm_l": "DEF-upper_arm.L", "arm_r": "DEF-upper_arm.R",
+			"fore_l": "DEF-forearm.L", "fore_r": "DEF-forearm.R", "head": "DEF-spine.006",
+		}
+		for key in names.keys():
+			var idx := _skel.find_bone(names[key])
+			if idx < 0:
+				idx = _skel.find_bone(String(names[key]).replace(".", "_"))   # (in case the importer changed the dots)
+			if idx < 0:
+				push_warning("enemy: the goblin has no bone called %s, so that part won't animate." % names[key])
+			_bones[key] = idx
+	else:
+		push_warning("enemy: the goblin has no skeleton, so it can't animate.")
+	_goblin_animate(0.0)
+
+
+func _goblin_set_overlay() -> void:
+	if _goblin_mi == null:
+		return
+	if is_flashing:
+		_goblin_mi.material_overlay = _flash_overlay
+	elif attack_phase == AttackPhase.WINDUP:
+		_goblin_mi.material_overlay = _windup_overlay
+	else:
+		_goblin_mi.material_overlay = null
+
+
+## Turns a bone by `q` (a rotation in the goblin's own space, around the bone's own joint) on top of whatever its parent
+## bones are doing. Bones are set parent-first, so every limb follows the bone above it.
+func _bone_extra(key: String, q: Quaternion) -> void:
+	var idx: int = _bones.get(key, -1)
+	if idx < 0 or _skel == null:
+		return
+	var parent := _skel.get_bone_parent(idx)
+	var pg := Basis.IDENTITY
+	if parent >= 0:
+		pg = _skel.get_bone_global_pose(parent).basis.orthonormalized()
+	var rest_local := _skel.get_bone_rest(idx).basis.orthonormalized()
+	var local := pg.inverse() * Basis(q) * pg * rest_local
+	_skel.set_bone_pose_rotation(idx, local.get_rotation_quaternion())
+
+
+## Poses the whole goblin. Angles are in radians. In the goblin's space +Z is forward, +Y is up and +X is its left. A swing
+## about X that goes forward is NEGATIVE; the arms start in a T-pose and are brought down by `down`.
+func _goblin_pose(th_l: float, th_r: float, knee_l: float, knee_r: float, arm_lx: float, arm_rx: float,
+		down_l: float, down_r: float, elbow_l: float, elbow_r: float, head_yaw: float) -> void:
+	if _skel == null:
+		return
+	var rx := Vector3(1.0, 0.0, 0.0)
+	var rz := Vector3(0.0, 0.0, 1.0)
+	_bone_extra("thigh_l", Quaternion(rx, th_l))
+	_bone_extra("shin_l", Quaternion(rx, knee_l))
+	_bone_extra("foot_l", Quaternion(rx, -(th_l + knee_l)))          # keeps the foot flat on the ground
+	_bone_extra("thigh_r", Quaternion(rx, th_r))
+	_bone_extra("shin_r", Quaternion(rx, knee_r))
+	_bone_extra("foot_r", Quaternion(rx, -(th_r + knee_r)))
+	_bone_extra("arm_l", Quaternion(rx, arm_lx) * Quaternion(rz, -down_l))   # (left arm points +X: down is a turn the other way for the right arm)
+	_bone_extra("arm_r", Quaternion(rx, arm_rx) * Quaternion(rz, down_r))
+	_bone_extra("fore_l", Quaternion(rx, -elbow_l))
+	_bone_extra("fore_r", Quaternion(rx, -elbow_r))
+	_bone_extra("head", Quaternion(Vector3.UP, head_yaw))
+
+
+func _goblin_animate(delta: float) -> void:
+	if _model_pivot == null:
+		return
+	var hs := Vector2(velocity.x, velocity.z).length()
+	_g_move = lerpf(_g_move, clampf(hs / 1.0, 0.0, 1.0), 1.0 - exp(-10.0 * delta))
+	var sprint_k := clampf((hs - move_speed) / maxf(sprint_speed - move_speed, 0.1), 0.0, 1.0)
+	_g_sprint = lerpf(_g_sprint, sprint_k, 1.0 - exp(-8.0 * delta))
+	_g_gait = fposmod(_g_gait + delta * hs * goblin_gait_rate * (1.0 - 0.45 * _g_sprint), TAU)
+	_g_idle += delta
+	_g_hit = maxf(_g_hit - delta * 4.0, 0.0)
+
+	var sp := _g_sprint
+	var m := _g_move
+	var fwd := sin(_g_gait)                                   # +1 = left leg furthest forward
+	var thigh_amp := deg_to_rad(lerpf(34.0, 58.0, sp)) * m
+	var breathe := sin(_g_idle * 2.0) * deg_to_rad(1.5)
+	var down := deg_to_rad(goblin_arm_down_degrees)
+
+	# Arms: [0] = left, [1] = right. They swing against the legs, and the elbow folds as the arm comes forward.
+	var swing := deg_to_rad(lerpf(30.0, 55.0, sp)) * m
+	var ax := [fwd * swing, -fwd * swing]                     # (negative = forward)
+	var adown := [down + breathe, down - breathe]
+	var elb_base := deg_to_rad(lerpf(14.0, 75.0, sp))
+	var elb_range := deg_to_rad(lerpf(30.0, 40.0, sp)) * m
+	var aelb := [elb_base + elb_range * 0.5 * (1.0 - fwd), elb_base + elb_range * 0.5 * (1.0 + fwd)]
+
+	# Legs: the thigh swings, the knee folds as the leg comes through, and bends harder when sprinting.
+	var knee_max := deg_to_rad(lerpf(60.0, 105.0, sp))
+	var th := [-fwd * thigh_amp, fwd * thigh_amp]
+	var knee := [deg_to_rad(6.0) + knee_max * maxf(0.0, cos(_g_gait)) * m,
+		deg_to_rad(6.0) + knee_max * maxf(0.0, cos(_g_gait + PI)) * m]
+
+	var crouch := 0.0
+	var lean_extra := -deg_to_rad(20.0) * sp                  # sprinting: leaning forward
+	var bounce := 0.035 + 0.03 * sp
+
+	# The claw swipe: one arm winds up high and back while the body crouches and rocks back, then it rakes down and across
+	# while the goblin steps in, then it recovers.
+	if state == State.ATTACKING:
+		var s_i := 1 if attack_right else 0
+		var o_i := 1 - s_i
+		var up := deg_to_rad(-150.0)
+		match attack_phase:
+			AttackPhase.WINDUP:
+				var e := smoothstep(0.0, 1.0, 1.0 - attack_timer / maxf(attack_windup, 0.01))
+				ax[s_i] = lerpf(ax[s_i], up, e)
+				adown[s_i] = lerpf(adown[s_i], deg_to_rad(25.0), e)
+				aelb[s_i] = lerpf(aelb[s_i], deg_to_rad(115.0), e)
+				ax[o_i] = lerpf(ax[o_i], deg_to_rad(-45.0), e)
+				aelb[o_i] = lerpf(aelb[o_i], deg_to_rad(80.0), e)
+				crouch = e * 0.7
+				lean_extra = deg_to_rad(10.0) * e
+			AttackPhase.LUNGE:
+				var p := clampf(1.0 - attack_timer / maxf(attack_lunge_time, 0.01), 0.0, 1.0)
+				var e2 := 1.0 - pow(1.0 - p, 3.0)
+				ax[s_i] = lerpf(up, deg_to_rad(-15.0), e2)
+				adown[s_i] = lerpf(deg_to_rad(25.0), deg_to_rad(62.0), e2)
+				aelb[s_i] = lerpf(deg_to_rad(115.0), deg_to_rad(12.0), e2)
+				ax[o_i] = lerpf(deg_to_rad(-45.0), deg_to_rad(-10.0), e2)
+				adown[o_i] = down
+				aelb[o_i] = lerpf(deg_to_rad(80.0), deg_to_rad(45.0), e2)
+				crouch = lerpf(0.7, 0.3, e2)
+				lean_extra = lerpf(deg_to_rad(10.0), -deg_to_rad(22.0), e2)   # throws the shoulders into it
+				var lead := 0 if attack_right else 1                         # the leg opposite the swinging arm steps in
+				th[lead] = lerpf(0.0, deg_to_rad(-40.0), e2)
+				knee[lead] = lerpf(deg_to_rad(30.0), deg_to_rad(15.0), e2)
+				th[1 - lead] = deg_to_rad(20.0) * e2
+				knee[1 - lead] = deg_to_rad(25.0)
+			AttackPhase.RECOVER:
+				var e3 := smoothstep(0.0, 1.0, 1.0 - attack_timer / maxf(attack_recover, 0.01))
+				ax[s_i] = lerpf(deg_to_rad(-15.0), ax[s_i], e3)
+				adown[s_i] = lerpf(deg_to_rad(62.0), adown[s_i], e3)
+				aelb[s_i] = lerpf(deg_to_rad(12.0), aelb[s_i], e3)
+				ax[o_i] = lerpf(deg_to_rad(-10.0), ax[o_i], e3)
+				aelb[o_i] = lerpf(deg_to_rad(45.0), aelb[o_i], e3)
+				crouch = lerpf(0.3, 0.0, e3)
+				lean_extra = lerpf(-deg_to_rad(22.0), 0.0, e3)
+				th[0] = lerpf(deg_to_rad(-20.0), th[0], e3)
+				th[1] = lerpf(deg_to_rad(10.0), th[1], e3)
+				knee[0] = lerpf(deg_to_rad(20.0), knee[0], e3)
+				knee[1] = lerpf(deg_to_rad(20.0), knee[1], e3)
+
+	# Crouch: both thighs come forward and both knees fold.
+	th[0] -= crouch * deg_to_rad(22.0)
+	th[1] -= crouch * deg_to_rad(22.0)
+	knee[0] += crouch * deg_to_rad(45.0)
+	knee[1] += crouch * deg_to_rad(45.0)
+
+	# Flinch when hit: arms jerk up, elbows fold, the body rocks back.
+	for i in 2:
+		ax[i] -= _g_hit * deg_to_rad(50.0)
+		adown[i] -= _g_hit * deg_to_rad(15.0)
+		aelb[i] += _g_hit * deg_to_rad(30.0)
+
+	# The head turns to follow you, within what a neck can do.
+	var want_head := sin(_g_idle * 0.7) * 0.08
+	if player != null and (state == State.CHASING or state == State.ATTACKING or state == State.LOOKING or state == State.ALERT):
+		var to_p := global_transform.basis.inverse() * (player.global_position - global_position)
+		want_head = clampf(atan2(-to_p.x, -to_p.z), -1.0, 1.0)
+	_g_head = lerpf(_g_head, want_head, 1.0 - exp(-8.0 * delta))
+
+	_goblin_pose(th[0], th[1], knee[0], knee[1], ax[0], ax[1], adown[0], adown[1], aelb[0], aelb[1], _g_head)
+
+	# Body: lean into the movement, a little of the old squash, a bounce in step with the run, lower when crouched.
+	_model_pivot.scale = Vector3.ONE * _model_scale * Vector3.ONE.lerp(jelly_scale, goblin_squash_strength)
+	_model_pivot.rotation = Vector3((lean_x + lean_extra) * goblin_lean_strength + _g_hit * 0.25, 0.0, lean_z * goblin_lean_strength)
+	_model_pivot.position = _feet_local + Vector3(0.0, absf(sin(_g_gait)) * bounce * m - crouch * 0.07, 0.0)
+
+
+## Death: the goblin goes limp and falls over backwards (if it was shot from the front) or forwards, then fades like the old corpse did.
+func _goblin_death_begin(push: Vector3) -> void:
+	_g_dead = true
+	_g_fall_t = 0.0
+	var forward := -global_transform.basis.z
+	_g_fall_sign = -1.0 if push.dot(forward) > 0.0 else 1.0
+	_goblin_mi.material_overlay = null
+	_g_hit = 0.0
+
+
+func _goblin_dead_update(delta: float) -> void:
+	if _model_pivot == null:
+		return
+	_g_fall_t = minf(_g_fall_t + delta / 0.5, 1.0)
+	var e := 1.0 - pow(1.0 - _g_fall_t, 3.0)
+	_model_pivot.scale = Vector3.ONE * _model_scale
+	_model_pivot.rotation = Vector3(_g_fall_sign * PI * 0.5 * e, 0.0, 0.0)
+	_model_pivot.position = _feet_local + Vector3(0.0, 0.12 * e, 0.0)             # lies on the ground, not in it
+	# Limp: arms flop out to the sides, knees soften.
+	var down := lerpf(deg_to_rad(goblin_arm_down_degrees), deg_to_rad(45.0), e)
+	_goblin_pose(deg_to_rad(-8.0) * e, deg_to_rad(6.0) * e, deg_to_rad(15.0) * e, deg_to_rad(10.0) * e,
+		deg_to_rad(-10.0) * e, deg_to_rad(10.0) * e, down, down, deg_to_rad(12.0), deg_to_rad(12.0), 0.0)
+
+
+## Puts the goblin back on its feet (after respawning).
+func _goblin_reset() -> void:
+	if _model_pivot == null:
+		return
+	_g_dead = false
+	_g_fall_t = 0.0
+	_g_hit = 0.0
+	_g_move = 0.0
+	_g_sprint = 0.0
+	_g_head = 0.0
+	_model_pivot.rotation = Vector3.ZERO
+	_model_pivot.scale = Vector3.ONE * _model_scale
+	_model_pivot.position = _feet_local
+	if _goblin_mi != null:
+		_goblin_mi.transparency = 0.0
+		_goblin_mi.material_overlay = null
+	_goblin_animate(0.0)
