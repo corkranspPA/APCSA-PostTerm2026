@@ -319,7 +319,7 @@ var knockback_timer := 0.0
 # FOV SYSTEM
 # -------------------------
 @export var normal_fov := 75.0
-@export var sprint_fov := 105.0     # widens while sprinting for a sense of speed
+@export var sprint_fov := 90.0      # CHANGED (was 105): widens while sprinting. Cyberpunk keeps it fairly subtle
 @export var slide_fov := 110.0      # widens further while sliding
 @export var dash_fov := 100.0       # dash also widens briefly for a burst-of-speed feel
 @export var slam_fov := 112.0       # slam stretches the view while diving
@@ -359,13 +359,29 @@ var bob_time := 0.0
 var base_camera_pos := Vector3.ZERO
 var base_camera_rot_x := 0.0
 
-@export var walk_bob_speed := 8.0
-@export var sprint_bob_speed := 13.0
-@export var crouch_bob_speed := 5.0
+@export var walk_bob_speed := 8.0          # (not used any more: the bob follows your footsteps, see walk_stride_length)
+@export var sprint_bob_speed := 13.0       # (not used any more)
+@export var crouch_bob_speed := 5.0        # (not used any more)
 
-@export var walk_bob_amount := 0.09
-@export var sprint_bob_amount := 0.16
-@export var crouch_bob_amount := 0.03
+# Walking: much calmer than before. Just a faint footstep rhythm.
+@export var walk_bob_amount := 0.022       # CHANGED (was 0.09): how far the camera dips on each step while walking (metres)
+@export var walk_bob_sway := 0.006         # NEW: side-to-side drift while walking (metres)
+@export var walk_stride_length := 2.8      # NEW: metres covered per footstep while walking (bigger = slower rhythm)
+@export var crouch_bob_amount := 0.012
+
+# Sprinting, Cyberpunk style: the camera drops and leans into the run, and every footfall hits: it dips, nods forward and
+# rolls a little toward the foot that landed, in time with your actual speed.
+@export var sprint_bob_amount := 0.075     # CHANGED: dip at each footfall (metres)
+@export var sprint_bob_sway := 0.045       # NEW: side-to-side sway as you run
+@export var sprint_bob_roll_degrees := 1.3 # NEW: roll toward each landing foot
+@export var sprint_bob_pitch_degrees := 1.5 # NEW: the view nods down on each footfall
+@export var sprint_stride_length := 3.4    # NEW: metres covered per footstep while sprinting
+@export var sprint_cam_drop := 0.12        # NEW: the camera sits lower while sprinting (metres)
+@export var sprint_cam_lean_degrees := 3.0 # NEW: the view tips forward while sprinting
+@export var sprint_fov_punch := 5.0        # NEW: the FOV overshoots a little as the sprint kicks in, then settles
+var _step_phase := 0.0                     # advances by PI per footstep
+var _bob_sprint_k := 0.0                   # 0..1 smoothed "is really sprinting"
+var _bob_roll := 0.0                       # radians, read by update_camera_tilt
 
 # -------------------------
 # BUNNY HOPPING
@@ -2505,7 +2521,7 @@ func update_fov(delta: float) -> void:
 
 	var target = normal_fov
 
-	var sprint_multiplier := 1.6 if is_sprinting else 1.0
+	var sprint_multiplier := 1.3 if is_sprinting else 1.0
 
 	if is_rolling:
 		# FOV follows the speed surge: widens a little as you launch, then settles back.
@@ -2526,7 +2542,7 @@ func update_fov(delta: float) -> void:
 		target = lerp(normal_fov, slide_fov, slide_amount)
 	elif is_sprinting:
 		# FOV widens in step with the sprint ramp-up, not instantly
-		target = lerp(normal_fov, sprint_fov, sprint_ramp)
+		target = lerp(normal_fov, sprint_fov, sprint_ramp) + sprint_fov_punch * sin(PI * clampf(sprint_ramp, 0.0, 1.0))
 	elif is_crouching or is_knocked_down:
 		target = normal_fov - 5.0
 
@@ -2600,7 +2616,7 @@ func update_camera_tilt(delta: float) -> void:
 		camera.rotation.x = lerp(camera.rotation.x, target_x, 12.0 * delta)
 		return
 
-	var target_roll := 0.0
+	var target_roll := rad_to_deg(_bob_roll)    # footstep roll while running (zero otherwise)
 
 	if is_wall_clinging:
 		target_roll = -wall_cling_normal.x * 12.0
@@ -2654,32 +2670,47 @@ func handle_crouch(delta: float) -> void:
 # HEAD BOB
 # -------------------------
 func apply_headbob(delta: float) -> void:
-	if is_rolling or is_knocked_down:
+	if is_rolling or is_knocked_down or is_burrowing:
+		_bob_roll = 0.0
 		return  # no bobbing on top of the roll tilt / knockdown drop
 
-	var moving := is_on_floor() and velocity.length() > 0.1
+	var hs := Vector2(velocity.x, velocity.z).length()
+	var moving := is_on_floor() and hs > 0.5 and not is_sliding and not is_wall_clinging
+
+	var want_sprint := 1.0 if (moving and is_sprinting and not is_crouching and hs > speed * 0.8) else 0.0
+	_bob_sprint_k = lerpf(_bob_sprint_k, want_sprint, 1.0 - exp(-7.0 * delta))
+	var ks := _bob_sprint_k
 
 	if not moving:
-		bob_time = 0.0
-		camera.position = camera.position.lerp(base_camera_pos, 10.0 * delta)
+		# Standing still (or in the air / sliding): ease everything back to rest.
+		_bob_roll = lerpf(_bob_roll, 0.0, 1.0 - exp(-10.0 * delta))
+		if not restore_camera_pitch:
+			camera.rotation.x = lerpf(camera.rotation.x, base_camera_rot_x, 1.0 - exp(-10.0 * delta))
+		if not is_sliding:
+			camera.position = camera.position.lerp(base_camera_pos, 10.0 * delta)
 		return
 
-	var spd := walk_bob_speed
-	var amt := walk_bob_amount
+	# Footsteps are tied to distance covered, so the rhythm matches how fast you really move.
+	var stride := lerpf(walk_stride_length, sprint_stride_length, ks)
+	_step_phase = fposmod(_step_phase + hs * delta / stride * PI, TAU)
+	var u := fposmod(_step_phase, PI) / PI                 # 0 at the instant a foot lands, then 0..1 until the next one
+	var dip := 1.0 - smoothstep(0.0, 0.6, u)              # sharp at the footfall, easing out
+	var side := sin(_step_phase)                          # one full left-right sway every two steps
 
-	if is_crouching:
-		spd = crouch_bob_speed
-		amt = crouch_bob_amount
-	elif is_sprinting:
-		spd = sprint_bob_speed
-		amt = sprint_bob_amount
-
-	bob_time += delta * spd
+	var amt := lerpf(crouch_bob_amount if is_crouching else walk_bob_amount, sprint_bob_amount, ks)
+	var sway := lerpf(walk_bob_sway, sprint_bob_sway, ks)
+	var speed_k := clampf(hs / maxf(speed, 0.1), 0.0, 1.0)  # a slow shuffle barely moves the camera at all
 
 	var offset := Vector3(
-		sin(bob_time * 2.5) * amt * 0.4,
-		sin(bob_time * 1.2) * amt * 1.8,
-		0
+		side * sway * speed_k,
+		-dip * amt * speed_k - sprint_cam_drop * ks * sprint_ramp,
+		0.0
 	)
+	var follow := lerpf(12.0, 22.0, ks)                    # snappier footfalls while sprinting
+	camera.position = camera.position.lerp(base_camera_pos + offset, follow * delta)
 
-	camera.position = camera.position.lerp(base_camera_pos + offset, 12.0 * delta)
+	# The view nods and rolls with each step and tips forward while you run.
+	_bob_roll = deg_to_rad(sprint_bob_roll_degrees) * side * ks * sprint_ramp
+	if not restore_camera_pitch:
+		var pitch := -deg_to_rad(sprint_bob_pitch_degrees) * dip * ks - deg_to_rad(sprint_cam_lean_degrees) * ks * sprint_ramp
+		camera.rotation.x = lerpf(camera.rotation.x, base_camera_rot_x + pitch, 1.0 - exp(-follow * delta))
