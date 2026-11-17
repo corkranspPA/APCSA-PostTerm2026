@@ -180,11 +180,24 @@ var can_see_player := false
 @export_group("Goblin model")
 @export var goblin_enabled := true                 # off = the old blob model, exactly as before
 @export var goblin_scene_path := "res://goblin.glb"
+@export var goblin_albedo_path := "res://goblin_ma_Base_color.jpg"   # the goblin's real colour image (copy goblin_ma_Base_color.jpg from the Blender project into your project)
+@export var goblin_albedo_fallback_path := "res://goblin_albedo.png"  # used if the real colour image isn't there: my painted stand-in
+@export var goblin_roughness_path := "res://goblin_ma_Roughness.jpg"   # optional: leave it out of the project and the model's built-in one is used
+@export var goblin_metallic_path := "res://goblin_ma_Metallic.png"      # optional, same
 @export var goblin_height_scale := 1.0             # 1.0 = the goblin is exactly as tall as the enemy's collision capsule
 @export var goblin_arm_down_degrees := 72.0        # how far the arms hang down from the model's T-pose (90 = straight down)
 @export var goblin_gait_rate := 1.0                # 1.0 = legs step exactly as fast as the ground moves under them; lower if the feet look like they skate, raise if they drag
 @export var goblin_lean_strength := 1.0            # how much the body leans into its movement and rocks back in a wind-up
 @export var goblin_step_surge := 0.1             # how much the body speeds up on each push-off and eases on landing (0 = constant glide)
+@export var goblin_shoulder_widen := 0.05          # how far each shoulder is moved out from the middle (metres, in the model's own size; 0 = original)
+@export var goblin_run_arms_bend := true            # while running, the arms swing back straight and fold inward as they come forward
+@export var goblin_elbow_out_degrees := 10.0        # elbows sit out from the body a little (the forearms angle back in)
+@export var goblin_hands_parallel := false          # true = the hands ignore the forearms and stay lined up with his body. false = hands continue straight on from the forearms
+@export var goblin_death_fall := true               # he goes limp AND falls over (backwards if shot from the front, forwards otherwise). false = he goes limp but stays standing
+@export var goblin_feet_in_line := true              # feet stay in line with the legs (no ankle bending while walking, like when he stands). false = feet kept flat on the ground
+@export var goblin_palms_in := true                 # palms always face in toward his body, also when the arm is raised or reaching
+@export var goblin_hand_forward_degrees := 25.0     # how far the fingers point forward from straight down
+@export var goblin_forearm_inward_degrees := 0.0    # how far each forearm angles in from the upper arm (0 = forearms line up with the upper arms)
 @export var goblin_arms_still := true               # arms rest at his sides and don't move (except for the claw swipe)
 @export var goblin_squash_strength := 0.3          # how much of the old jelly squash-and-stretch is kept (0 = none)
 
@@ -211,13 +224,32 @@ var _q_chest := Quaternion.IDENTITY                # hips + spine combined (the 
 var _pel_pitch := 0.0
 var _head_pitch := 0.0
 var _head_roll := 0.0
+var _g_posed := false
+var _far_anim_ms := 0
+var _head_pitch_idle := 0.0
 var _toe_l := 0.0
 var _toe_r := 0.0
 var _hand_l := 0.0
 var _hand_r := 0.0
+var _sw_arm := 0                                   # which arm is doing the claw swipe (0 = left, 1 = right)
+var _sw_w := 0.0                                   # how much the swipe pose is in charge of that arm (0..1)
+var _sw_d := Vector3(0.65, 0.62, -0.25)            # swipe: where the upper arm points (body space; left arm shown, the right is mirrored)
+var _sw_f := Vector3(0.35, 0.95, 0.15)             # swipe: where the forearm points
+var _run_d := [Vector3.ZERO, Vector3.ZERO]         # running arm: where each upper arm points (left-arm frame, mirrored for the right)
+var _run_f := [Vector3.ZERO, Vector3.ZERO]         # running arm: where each forearm points
+var _run_w := 0.0                                  # how much the running arm swing is in charge (0..1)
+var _elbow_in := 0.0                               # radians the forearms angle inward from the elbows
+var _facing_node: Node3D = null                    # the node that turns the model round to face the right way
+var _rd_on := false                                # the arms and legs are being simulated (death)
+var _rd_d := []                                    # simulated limb directions in the goblin's own space: armL upper/fore, armR upper/fore, thighL/shinL, thighR/shinR
+var _rd_v := []                                    # their swing speeds
+var _rd_ground := 0.0                              # world height of the ground under him
 var _gs := []                                      # smoothed pose values, so the upper body follows through instead of snapping
 var _g_dead := false
 var _g_fall_t := 0.0
+var _g_fall_th := 0.04                              # how far over he has tipped (radians; PI/2 = flat on the ground)
+var _g_fall_w := 0.0                                # how fast he is tipping (radians/second)
+var _g_land_age := -1.0                             # corpse_age when he first hit the ground (-1 = not yet)
 var _g_fall_sign := 1.0
 
 func _ready() -> void:
@@ -265,6 +297,12 @@ func _physics_process(delta: float) -> void:
 	if is_dead:
 		_apply_fade(delta)
 		return
+
+	# The goblin is posed on the very first frame, wherever it is, so it never shows the model's arms-out T-pose.
+	if _model_pivot != null and not _g_posed:
+		_g_posed = true
+		_goblin_animate(0.016)
+		_far_anim_ms = Time.get_ticks_msec()
 
 	# PERFORMANCE: an idle enemy far from the player does nothing useful (it can't see or hear you from here), so it only
 	# runs one physics frame in six. It always runs fully while it's in the air, so it still settles onto the ground.
@@ -348,6 +386,14 @@ func _physics_process(delta: float) -> void:
 	# PERFORMANCE: the squash-and-stretch animation is skipped for enemies too far away to notice it.
 	if anim_distance <= 0.0 or global_position.distance_squared_to(player.global_position) < anim_distance * anim_distance:
 		_apply_wobble(delta)
+		_far_anim_ms = Time.get_ticks_msec()
+	elif _model_pivot != null:
+		# Far away: the goblin still idles, just at a lower rate (about 8 times a second), by the real time that has passed.
+		var now := Time.get_ticks_msec()
+		var el := float(now - _far_anim_ms) / 1000.0
+		if el >= 0.12:
+			_far_anim_ms = now
+			_goblin_animate(minf(el, 0.25))
 	move_and_slide()
 
 # =========================
@@ -1105,6 +1151,7 @@ func _setup_goblin() -> void:
 	facing.rotation.y = PI
 	_model_pivot.add_child(facing)
 	facing.add_child(inst)
+	_facing_node = facing
 
 	mesh.visible = false
 	face_mesh.visible = false
@@ -1115,6 +1162,26 @@ func _setup_goblin() -> void:
 		if _goblin_mat_shared == null:
 			_goblin_mat_shared = (gm as BaseMaterial3D).duplicate() as BaseMaterial3D
 			_goblin_mat_shared.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS
+			# The model's own colour map is only grey shading, so it was showing up grey. This is a painted colour map with
+			# the goblin's real colours (green skin, brown shorts, bone skull hat, black beads, silver and gold bands, claws).
+			var tex := _goblin_load_tex(goblin_albedo_path)
+			if tex == null:
+				tex = _goblin_load_tex(goblin_albedo_fallback_path)
+			if tex != null:
+				_goblin_mat_shared.albedo_texture = tex
+				_goblin_mat_shared.albedo_color = Color.WHITE
+			else:
+				push_warning("enemy: couldn't find %s (or %s), so the goblin keeps the model's grey look. Copy the goblin's Base_color image into your project." % [goblin_albedo_path, goblin_albedo_fallback_path])
+			var rt := _goblin_load_tex(goblin_roughness_path)
+			if rt != null:
+				_goblin_mat_shared.roughness_texture = rt
+				_goblin_mat_shared.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+				_goblin_mat_shared.roughness = 1.0
+			var mt := _goblin_load_tex(goblin_metallic_path)
+			if mt != null:
+				_goblin_mat_shared.metallic_texture = mt
+				_goblin_mat_shared.metallic_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+				_goblin_mat_shared.metallic = 1.0
 		_goblin_mi.set_surface_override_material(0, _goblin_mat_shared)
 	_goblin_mi.extra_cull_margin = 1.0                   # posed arms reach outside the model's resting box
 
@@ -1139,7 +1206,7 @@ func _setup_goblin() -> void:
 			"fore_l": "DEF-forearm.L", "fore_r": "DEF-forearm.R", "head": "DEF-spine.006",
 			"sp0": "DEF-spine", "sp1": "DEF-spine.001", "sp2": "DEF-spine.002", "sp3": "DEF-spine.003",
 			"neck1": "DEF-spine.004", "neck2": "DEF-spine.005",
-			"sh_l": "DEF-shoulder.L", "sh_r": "DEF-shoulder.R", "hand_l": "DEF-hand.L", "hand_r": "DEF-hand.R", "toe_l": "DEF-toe.L", "toe_r": "DEF-toe.R",
+			"org_sh_l": "ORG-shoulder.L", "org_sh_r": "ORG-shoulder.R", "sh_l": "DEF-shoulder.L", "sh_r": "DEF-shoulder.R", "hand_l": "DEF-hand.L", "hand_r": "DEF-hand.R", "toe_l": "DEF-toe.L", "toe_r": "DEF-toe.R",
 		}
 		for key in names.keys():
 			var idx := _skel.find_bone(names[key])
@@ -1151,6 +1218,13 @@ func _setup_goblin() -> void:
 	else:
 		push_warning("enemy: the goblin has no skeleton, so it can't animate.")
 	_goblin_animate(0.0)
+
+
+## Loads an image from the project if it is there (no error if it isn't).
+func _goblin_load_tex(path: String) -> Texture2D:
+	if path == "" or not ResourceLoader.exists(path):
+		return null
+	return load(path) as Texture2D
 
 
 func _goblin_set_overlay() -> void:
@@ -1186,27 +1260,127 @@ func _goblin_pose(th_l: float, th_r: float, knee_l: float, knee_r: float, arm_lx
 	var rx := Vector3(1.0, 0.0, 0.0)
 	var rz := Vector3(0.0, 0.0, 1.0)
 	# Legs hang from the hips and arms from the chest, so they carry the body's twist and lean with them.
-	_bone_extra("thigh_l", _q_pel * Quaternion(rx, th_l))
-	_bone_extra("shin_l", Quaternion(rx, knee_l))
-	_bone_extra("foot_l", Quaternion(rx, -(th_l + knee_l + _pel_pitch) + _toe_l))
-	_bone_extra("toe_l", Quaternion(rx, -_toe_l))
-	_bone_extra("thigh_r", _q_pel * Quaternion(rx, th_r))
-	_bone_extra("shin_r", Quaternion(rx, knee_r))
-	_bone_extra("foot_r", Quaternion(rx, -(th_r + knee_r + _pel_pitch) + _toe_r))
-	_bone_extra("toe_r", Quaternion(rx, -_toe_r))
-	_bone_extra("arm_l", _q_chest * Quaternion(rx, arm_lx) * Quaternion(rz, -down_l))
-	_bone_extra("arm_r", _q_chest * Quaternion(rx, arm_rx) * Quaternion(rz, down_r))
-	_bone_extra("sh_l", _q_chest * Quaternion(rz, -clampf(down_l - 1.2, -0.4, 0.0) * 0.35))
-	_bone_extra("sh_r", _q_chest * Quaternion(rz, clampf(down_r - 1.2, -0.4, 0.0) * 0.35))
-	_bone_extra("fore_l", Quaternion(rx, -elbow_l))
-	_bone_extra("fore_r", Quaternion(rx, -elbow_r))
-	_bone_extra("hand_l", Quaternion(rx, _hand_l))
-	_bone_extra("hand_r", Quaternion(rx, _hand_r))
+	var q_th := [_q_pel * Quaternion(rx, th_l), _q_pel * Quaternion(rx, th_r)]
+	var q_sh := [Quaternion(rx, knee_l), Quaternion(rx, knee_r)]
+	var feet_flat: bool = not goblin_feet_in_line
+	if _rd_on and _rd_d.size() == 8:
+		# Dead: the legs follow the simulation (each thigh and shin is aimed at where gravity has swung it).
+		for i in 2:
+			var sl := 1.0 if i == 0 else -1.0
+			var t0 := Vector3(0.008 * sl, -0.237, -0.001).normalized()
+			var s0 := Vector3(0.007 * sl, -0.249, -0.027).normalized()
+			var qt: Quaternion = Quaternion(t0, _rd_d[4 + i * 2])
+			q_th[i] = qt
+			q_sh[i] = Quaternion(s0, _rd_d[5 + i * 2]) * qt.inverse()
+		feet_flat = false
+	_bone_extra("thigh_l", q_th[0])
+	_bone_extra("shin_l", q_sh[0])
+	_bone_extra("foot_l", Quaternion(rx, -(th_l + knee_l + _pel_pitch) + _toe_l) if feet_flat else Quaternion.IDENTITY)
+	_bone_extra("toe_l", Quaternion(rx, -_toe_l) if feet_flat else Quaternion.IDENTITY)
+	_bone_extra("thigh_r", q_th[1])
+	_bone_extra("shin_r", q_sh[1])
+	_bone_extra("foot_r", Quaternion(rx, -(th_r + knee_r + _pel_pitch) + _toe_r) if feet_flat else Quaternion.IDENTITY)
+	_bone_extra("toe_r", Quaternion(rx, -_toe_r) if feet_flat else Quaternion.IDENTITY)
+	# The collar bones (ORG-shoulder) carry the shoulder joints. Swinging an arm up and forward with the shoulder joint
+	# fixed drives the armpit and shoulder through the chest, so while the swipe is on, the shoulder lifts and rolls
+	# forward with the arm (the way a real shoulder does), which carries the whole arm out of the torso.
+	var qs := [Quaternion.IDENTITY, Quaternion.IDENTITY]
+	if _sw_w > 0.001:
+		var sgs := 1.0 if _sw_arm == 0 else -1.0
+		var lift := deg_to_rad(40.0) * maxf(_sw_d.y, 0.0) - deg_to_rad(10.0) * maxf(-_sw_d.y, 0.0)
+		var prot := deg_to_rad(50.0) * _sw_d.z
+		qs[_sw_arm] = Quaternion(rz, sgs * lift * _sw_w) * Quaternion(Vector3.UP, -sgs * prot * _sw_w)
+	var qst: Array = [_q_chest * (qs[0] as Quaternion), _q_chest * (qs[1] as Quaternion)]
+	_bone_extra("org_sh_l", qst[0])
+	_bone_extra("org_sh_r", qst[1])
+	_bone_shift("org_sh_l", Vector3(goblin_shoulder_widen, 0.0, 0.0))     # wider shoulders: both collar bones sit further out
+	_bone_shift("org_sh_r", Vector3(-goblin_shoulder_widen, 0.0, 0.0))
+	var q_arm := [_q_chest * Quaternion(rx, arm_lx) * Quaternion(rz, -down_l), _q_chest * Quaternion(rx, arm_rx) * Quaternion(rz, down_r)]
+	var q_fore := [Quaternion(rz, _elbow_in) * Quaternion(rx, -elbow_l), Quaternion(rz, -_elbow_in) * Quaternion(rx, -elbow_r)]
+	if _run_w > 0.001:
+		# Running arms: each upper arm and forearm is aimed directly, so the whole arm moves (see the swipe below).
+		for i in 2:
+			var sr := 1.0 if i == 0 else -1.0
+			var ur := Vector3(0.197 * sr, -0.041, 0.013).normalized()
+			var fr := Vector3(0.151 * sr, -0.018, 0.014).normalized()
+			var dr := Vector3((_run_d[i] as Vector3).x * sr, (_run_d[i] as Vector3).y, (_run_d[i] as Vector3).z).normalized()
+			var ff := Vector3((_run_f[i] as Vector3).x * sr, (_run_f[i] as Vector3).y, (_run_f[i] as Vector3).z).normalized()
+			var qa2: Quaternion = _q_chest * Quaternion(ur, dr)
+			var qf2: Quaternion = (_q_chest * Quaternion(fr, ff)) * qa2.inverse()
+			q_arm[i] = (q_arm[i] as Quaternion).slerp(qa2, _run_w)
+			q_fore[i] = (q_fore[i] as Quaternion).slerp(qf2, _run_w)
+	if _sw_w > 0.001:
+		# The claw swipe. Swinging the arm by angles only twists it about its own length once it is raised out to the side
+		# (so only the hand seemed to move). Instead, aim the upper arm and the forearm at where they should point, which
+		# makes the whole arm reach and sweep, and keeps it out in front of the body instead of through it.
+		var sg := 1.0 if _sw_arm == 0 else -1.0
+		var u0 := Vector3(0.197 * sg, -0.041, 0.013).normalized()          # the arm's directions in the T-pose
+		var f0 := Vector3(0.151 * sg, -0.018, 0.014).normalized()
+		var d := Vector3(_sw_d.x * sg, _sw_d.y, _sw_d.z).normalized()
+		var f := Vector3(_sw_f.x * sg, _sw_f.y, _sw_f.z).normalized()
+		var qa: Quaternion = _q_chest * Quaternion(u0, d)
+		var qf: Quaternion = (_q_chest * Quaternion(f0, f)) * qa.inverse()
+		q_arm[_sw_arm] = (q_arm[_sw_arm] as Quaternion).slerp(qa, _sw_w)
+		q_fore[_sw_arm] = (q_fore[_sw_arm] as Quaternion).slerp(qf, _sw_w)
+	if _rd_on and _rd_d.size() == 8:
+		# Dead: the arms follow the simulation too.
+		for i in 2:
+			var sa := 1.0 if i == 0 else -1.0
+			var ua := Vector3(0.197 * sa, -0.041, 0.013).normalized()
+			var fa2 := Vector3(0.151 * sa, -0.018, 0.014).normalized()
+			var qau: Quaternion = Quaternion(ua, _rd_d[i * 2])
+			q_arm[i] = qau
+			q_fore[i] = Quaternion(fa2, _rd_d[i * 2 + 1]) * qau.inverse()
+	# (The arm bones sit under the shoulders, so take the shoulders' own turn back out of what they are given.)
+	_bone_extra("arm_l", (q_arm[0] as Quaternion) * (qst[0] as Quaternion).inverse())
+	_bone_extra("arm_r", (q_arm[1] as Quaternion) * (qst[1] as Quaternion).inverse())
+	_bone_extra("sh_l", _q_chest * Quaternion(rz, -clampf(down_l - 1.2, -0.4, 0.0) * 0.35) * (qst[0] as Quaternion).inverse())
+	_bone_extra("sh_r", _q_chest * Quaternion(rz, clampf(down_r - 1.2, -0.4, 0.0) * 0.35) * (qst[1] as Quaternion).inverse())
+	_bone_extra("fore_l", q_fore[0])
+	_bone_extra("fore_r", q_fore[1])
+	if goblin_hands_parallel:
+		# Hands hold one direction relative to his body (fingers down and a little forward, palms toward him), whatever the
+		# arm is doing, by cancelling out everything the arm and forearm have turned.
+		for i in 2:
+			var sh := 1.0 if i == 0 else -1.0
+			var fa := deg_to_rad(goblin_hand_forward_degrees)
+			var tgt := Vector3(-0.12 * sh, -cos(fa), sin(fa)).normalized()
+			var q_des: Quaternion = _q_chest * Quaternion(Vector3(sh, 0.0, 0.0), tgt)
+			var q_par: Quaternion = (q_fore[i] as Quaternion) * (q_arm[i] as Quaternion)
+			_bone_extra("hand_l" if i == 0 else "hand_r", q_des * q_par.inverse())
+	else:
+		# Hands in line with the forearms, with the palms always turned in toward his body. A hand hanging at his side
+		# already faces that way; when the arm is raised or reaching, the aimed arm leaves the palm facing down or out,
+		# so the hand is rolled about its own length until the palm faces in again.
+		for i in 2:
+			var sp2 := 1.0 if i == 0 else -1.0
+			var qp: Quaternion = (q_fore[i] as Quaternion) * (q_arm[i] as Quaternion)
+			var hdir: Vector3 = qp * Vector3(sp2, 0.0, 0.0)                    # which way the hand points now
+			var palm: Vector3 = qp * Vector3(0.0, -1.0, 0.0)                   # which way the palm faces now (it starts facing down)
+			var want: Vector3 = _q_chest * Vector3(-sp2, 0.0, 0.0)              # toward the middle of the body
+			want = want - hdir * want.dot(hdir)
+			var roll := 0.0
+			if goblin_palms_in and want.length() > 0.05:
+				want = want.normalized()
+				roll = atan2(hdir.dot(palm.cross(want)), palm.dot(want))
+			_bone_extra("hand_l" if i == 0 else "hand_r", Quaternion(hdir.normalized(), roll))
 	# Neck and head share the turn, so it reads as a neck rather than a head spinning on a post.
 	var hq := Vector3(_head_pitch, head_yaw, _head_roll)
 	_bone_extra("neck1", Quaternion(Basis.from_euler(hq * 0.25)))
 	_bone_extra("neck2", Quaternion(Basis.from_euler(hq * 0.3)))
 	_bone_extra("head", Quaternion(Basis.from_euler(hq * 0.45)))
+
+
+## Moves a bone away from its resting place by `offset` (in the goblin's own space). Everything under it comes with it.
+func _bone_shift(key: String, offset: Vector3) -> void:
+	var idx: int = _bones.get(key, -1)
+	if idx < 0 or _skel == null:
+		return
+	var parent := _skel.get_bone_parent(idx)
+	var pg := Basis.IDENTITY
+	if parent >= 0:
+		pg = _skel.get_bone_global_pose(parent).basis.orthonormalized()
+	_skel.set_bone_pose_position(idx, _skel.get_bone_rest(idx).origin + pg.inverse() * offset)
 
 
 ## Bends the spine. Torso angles are shared over the chest bones; the hips move on their own. Angles in radians: pitch
@@ -1315,10 +1489,21 @@ func _goblin_animate(delta: float) -> void:
 			var sd := 1.0 if i == 0 else -1.0
 			var still_ax: float = -th[i] * 0.1 * (0.5 + k)
 			var still_down: float = down + breathe * 0.6 + m * deg_to_rad(2.5) * sin(TAU * _g_gait) * sd
-			var still_elb: float = deg_to_rad(14.0) + m * deg_to_rad(4.0) * (0.5 - 0.5 * clampf(still_ax * 8.0, -1.0, 1.0))
+			var still_elb: float = deg_to_rad(3.0) + m * deg_to_rad(4.0) * (0.5 - 0.5 * clampf(still_ax * 8.0, -1.0, 1.0))
 			ax[i] = lerpf(still_ax, deg_to_rad(-48.0), sp)           # (while sprinting: held in front, see above)
 			adown[i] = lerpf(still_down, deg_to_rad(86.0), sp)
 			aelb[i] = lerpf(still_elb, deg_to_rad(100.0), sp)
+	# Standing about: now and then one hand comes up to the chest (a scratch or a fidget), each arm on its own timing.
+	var idle_k := 1.0 - m
+	if idle_k > 0.01 and state != State.ATTACKING:
+		for i in 2:
+			var cyc := 9.0 if i == 0 else 13.0
+			var ph0 := fposmod(_g_idle + (0.0 if i == 0 else 4.0), cyc)
+			var bump := sin(PI * clampf((ph0 - (cyc - 2.4)) / 2.4, 0.0, 1.0))
+			bump = bump * bump * idle_k
+			ax[i] -= deg_to_rad(52.0) * bump
+			aelb[i] += deg_to_rad(80.0) * bump
+			adown[i] += deg_to_rad(14.0) * bump + deg_to_rad(3.0) * sin(_g_idle * 1.3 + float(i) * 2.0) * idle_k
 
 	var crouch := 0.0
 	var lean_extra := -deg_to_rad(14.0) * sp - deg_to_rad(5.0) * k * m          # leaning into the run
@@ -1326,6 +1511,7 @@ func _goblin_animate(delta: float) -> void:
 
 	# The claw swipe: a fast diagonal slash. One arm whips from high and outside down across the body to low on the far
 	# side, the shoulders turning through it, with no wind-up pause. Each attack uses the other arm.
+	var sw_target := 0.0
 	if state == State.ATTACKING:
 		var s_i := 1 if attack_right else 0
 		var o_i := 1 - s_i
@@ -1347,6 +1533,20 @@ func _goblin_animate(delta: float) -> void:
 				ax[o_i] = lerpf(ax[o_i], deg_to_rad(-40.0), rise)             # the other arm comes up as a guard
 				aelb[o_i] = lerpf(aelb[o_i], deg_to_rad(85.0), rise)
 				twist = sgn * lerpf(lerpf(0.0, -0.5, rise), 0.4, slash)       # shoulders wind back, then whip through
+				# The reach: the arm starts high, out and back with the forearm cocked up; it then sweeps forward at
+				# chest height, fully extended (the reach); and finishes low and across, still out in front of the body.
+				_sw_arm = s_i
+				var pa := Vector3(0.65, 0.62, -0.25)
+				var pfa := Vector3(0.35, 0.95, 0.15)
+				var pb := Vector3(0.40, 0.08, 0.92)
+				var pfb := Vector3(0.12, 0.0, 1.0)
+				var pc := Vector3(-0.05, -0.55, 0.83)
+				var pfc := Vector3(-0.30, -0.70, 0.65)
+				var s1 := smoothstep(0.12, 0.55, p)
+				var s2 := smoothstep(0.5, 1.0, p)
+				_sw_d = (pa.lerp(pb, s1).lerp(pc, s2)).normalized()
+				_sw_f = (pfa.lerp(pfb, s1).lerp(pfc, s2)).normalized()
+				sw_target = 1.0
 				crouch = 0.45 * rise
 				lean_extra = lerpf(lean_extra, -deg_to_rad(18.0), slash)
 			AttackPhase.RECOVER:
@@ -1358,6 +1558,10 @@ func _goblin_animate(delta: float) -> void:
 				aelb[o_i] = lerpf(deg_to_rad(85.0), aelb[o_i], e3)
 				twist = sgn * lerpf(0.4, 0.0, e3)
 				crouch = lerpf(0.45, 0.0, e3)
+				_sw_arm = s_i
+				_sw_d = Vector3(-0.05, -0.55, 0.83).normalized()
+				_sw_f = Vector3(-0.30, -0.70, 0.65).normalized()
+				sw_target = 1.0 - e3
 
 	th[0] -= crouch * deg_to_rad(22.0)
 	th[1] -= crouch * deg_to_rad(22.0)
@@ -1406,6 +1610,16 @@ func _goblin_animate(delta: float) -> void:
 		aelb[i] += imp * deg_to_rad(14.0) * sp
 		adown[i] += imp * deg_to_rad(5.0) * sp
 
+	# Idle: weight shifts slowly from one leg to the other (the unloaded knee softens), and he breathes.
+	var shift := sin(_g_idle * 0.35)
+	p_roll += shift * deg_to_rad(4.0) * (1.0 - m)
+	p_yaw += sin(_g_idle * 0.21) * deg_to_rad(3.0) * (1.0 - m)
+	knee[0] += maxf(shift, 0.0) * deg_to_rad(11.0) * (1.0 - m)
+	knee[1] += maxf(-shift, 0.0) * deg_to_rad(11.0) * (1.0 - m)
+	th[0] -= maxf(shift, 0.0) * deg_to_rad(5.0) * (1.0 - m)
+	th[1] -= maxf(-shift, 0.0) * deg_to_rad(5.0) * (1.0 - m)
+	t_pitch += sin(_g_idle * 1.6) * deg_to_rad(1.6) * (1.0 - m)
+
 	var rate_t := 11.0
 	var rate_a := 16.0
 	t_yaw = _gsm(0, t_yaw, rate_t, delta)
@@ -1420,6 +1634,7 @@ func _goblin_animate(delta: float) -> void:
 	knee[1] = _gsm(15, knee[1], 20.0, delta)
 	toe[0] = _gsm(16, toe[0], 18.0, delta)
 	toe[1] = _gsm(17, toe[1], 18.0, delta)
+	_sw_w = _gsm(20, sw_target, 24.0, delta)
 	var ax_s := [_gsm(6, ax[0], rate_a, delta), _gsm(7, ax[1], rate_a, delta)]
 	var ad_s := [_gsm(8, adown[0], rate_a, delta), _gsm(9, adown[1], rate_a, delta)]
 	var ae_s := [_gsm(10, aelb[0], rate_a, delta), _gsm(11, aelb[1], rate_a, delta)]
@@ -1431,7 +1646,8 @@ func _goblin_animate(delta: float) -> void:
 	_toe_r = toe[1]
 
 	# The head follows you, stays steadier than the chest, and tips with the movement.
-	var want_head := sin(_g_idle * 0.7) * 0.08
+	# Idle: he glances slowly around, pausing to look one way, then the other (and a little up and down).
+	var want_head := (sin(_g_idle * 0.45) * 0.55 + sin(_g_idle * 0.93 + 1.3) * 0.22) * (1.0 - m) + sin(_g_idle * 0.7) * 0.08 * m
 	if player != null and (state == State.CHASING or state == State.ATTACKING or state == State.LOOKING or state == State.ALERT):
 		var to_p := global_transform.basis.inverse() * (player.global_position - global_position)
 		var ang := atan2(-to_p.x, -to_p.z)
@@ -1440,10 +1656,33 @@ func _goblin_animate(delta: float) -> void:
 		want_head = clampf(ang, -1.0, 1.0) * in_front
 	want_head -= t_yaw * 0.6                                         # cancel most of the torso's twist so the eyes stay on you
 	_g_head = lerpf(_g_head, want_head, 1.0 - exp(-8.0 * delta))
-	_head_pitch = -t_pitch * (0.6 + 0.2 * sp) - p_pitch * 0.3 - _g_hit * 0.3 - imp * deg_to_rad(10.0)     # head nods into each landing
+	_head_pitch = _head_pitch_idle - t_pitch * (0.6 + 0.2 * sp) - p_pitch * 0.3 - _g_hit * 0.3 - imp * deg_to_rad(10.0)     # head nods into each landing
+	_head_pitch_idle = sin(_g_idle * 0.6 + 0.5) * 0.1 * (1.0 - m)
 	_head_roll = -t_roll * 0.7 + sin(ph) * deg_to_rad(7.0) * runk
 	_head_pitch += sin(ph * 2.0) * deg_to_rad(8.0) * runk
 
+	# Elbows out: the upper arms angle out a little and the forearms come back in toward the body.
+	_elbow_in = deg_to_rad(goblin_forearm_inward_degrees)
+	for i in 2:
+		ad_s[i] -= deg_to_rad(goblin_elbow_out_degrees)
+
+	# Running arms: as an arm goes back it extends straight down behind; as it comes forward the elbow folds and the hand
+	# tucks inward toward the middle of the chest; then it straightens and drops back again. Opposite to the legs.
+	var run_target := 0.0
+	if goblin_run_arms_bend:
+		run_target = smoothstep(2.0, 6.0, hs) * m
+	_run_w = _gsm(21, run_target, 10.0, delta)
+	if _run_w > 0.001:
+		var back_d := Vector3(0.20, -0.86, -0.46)
+		var back_f := Vector3(0.14, -0.93, -0.34)       # (almost straight, hanging down behind)
+		var fwd_d := Vector3(0.22, -0.78, 0.58)
+		var fwd_f := Vector3(-0.20, 0.12, 0.97)         # (folded up and inward toward the chest)
+		for i in 2:
+			var ua := _g_gait if i == 0 else fposmod(_g_gait + 0.5, 1.0)       # the left arm is back when the left leg is forward
+			var tt := 0.5 - 0.5 * cos(TAU * ua)                                  # 0 = furthest back, 1 = furthest forward
+			var bend := smoothstep(0.1, 0.95, tt)
+			_run_d[i] = back_d.lerp(fwd_d, tt).normalized()
+			_run_f[i] = back_f.lerp(fwd_f, bend).normalized()
 	_goblin_spine(t_pitch, t_yaw, t_roll, p_pitch, p_yaw, p_roll)
 	_goblin_pose(th[0], th[1], knee[0], knee[1], ax_s[0], ax_s[1], ad_s[0], ad_s[1], ae_s[0], ae_s[1], _g_head + cos(ph) * deg_to_rad(9.0) * runk * (0.0 if state == State.ATTACKING else 1.0))
 
@@ -1467,7 +1706,14 @@ func _goblin_animate(delta: float) -> void:
 ## Death: the goblin goes limp and falls over backwards (if it was shot from the front) or forwards, then fades like the old corpse did.
 func _goblin_death_begin(push: Vector3) -> void:
 	_g_dead = true
+	_sw_w = 0.0
+	_run_w = 0.0
+	_elbow_in = 0.0
 	_g_fall_t = 0.0
+	_g_fall_th = 0.04
+	_g_fall_w = clampf(0.25 + 0.1 * push.length(), 0.25, 1.4)      # the killing blow gives him his first shove
+	_g_land_age = -1.0
+	_rd_start(push)
 	var forward := -global_transform.basis.z
 	_g_fall_sign = -1.0 if push.dot(forward) > 0.0 else 1.0
 	_goblin_mi.material_overlay = null
@@ -1477,22 +1723,163 @@ func _goblin_death_begin(push: Vector3) -> void:
 func _goblin_dead_update(delta: float) -> void:
 	if _model_pivot == null:
 		return
-	_g_fall_t = minf(_g_fall_t + delta / 0.5, 1.0)
-	var e := 1.0 - pow(1.0 - _g_fall_t, 3.0)
+	_goblin_limp_update(delta, goblin_death_fall)
+
+
+## Death: every muscle lets go. The knees give, the back slumps, the head drops and the arms hang and swing loosely. With
+## `fall` on he also topples over like a dropped sack, with the limp joints letting him fold as he goes.
+func _goblin_limp_update(delta: float, fall: bool) -> void:
+	_g_fall_t = minf(_g_fall_t + delta / 0.35, 1.0)
+	var e := 1.0 - pow(1.0 - _g_fall_t, 2.0)
+	var loose := exp(-corpse_age * 2.5)                          # the arms' loose swing dies away (starts again when he hits the ground)
+	if _g_land_age >= 0.0:
+		loose = 1.4 * exp(-(corpse_age - _g_land_age) * 3.0)
 	_model_pivot.scale = Vector3.ONE * _model_scale
-	_model_pivot.rotation = Vector3(_g_fall_sign * PI * 0.5 * e, 0.0, 0.0)
-	_model_pivot.position = _feet_local + Vector3(0.0, 0.12 * e, 0.0)             # lies on the ground, not in it
-	# Limp: arms flop out to the sides, knees soften.
-	var down := lerpf(deg_to_rad(goblin_arm_down_degrees), deg_to_rad(50.0), e)
+	var th := [deg_to_rad(-12.0) * e, deg_to_rad(9.0) * e]
+	var kn := [deg_to_rad(46.0) * e, deg_to_rad(34.0) * e]
+	var h_need := 0.0
+	for i in 2:
+		h_need = maxf(h_need, 0.051 + 0.237 * cos(th[i]) + 0.249 * cos(th[i] + kn[i]))
+	var sag_y := (h_need - 0.537) * _model_scale
+	if fall:
+		# Gravity takes him: he tips over his heels like a dropped plank. The pull gets stronger the further over he is, so he
+		# starts slowly and drops faster and faster, then lands with a thump and a small bounce.
+		var dt := minf(delta, 0.033)
+		var steps := 3
+		for _i in steps:
+			var h := dt / float(steps)
+			_g_fall_w += (9.0 * sin(_g_fall_th) + 1.5) * h
+			_g_fall_th += _g_fall_w * h
+			if _g_fall_th >= PI * 0.5:
+				_g_fall_th = PI * 0.5
+				if _g_fall_w > 0.8:
+					_g_fall_w = -_g_fall_w * 0.2                              # small bounce
+				else:
+					_g_fall_w = 0.0
+				if _g_land_age < 0.0:
+					_g_land_age = corpse_age
+		var ef := _g_fall_th / (PI * 0.5)
+		_rd_step(dt, _g_land_age >= 0.0 and corpse_age - _g_land_age < dt * 1.5)
+		_model_pivot.rotation = Vector3(_g_fall_sign * _g_fall_th, 0.0, deg_to_rad(4.0) * e)
+		_model_pivot.position = _feet_local + Vector3(0.0, lerpf(sag_y, 0.12, ef), 0.0)       # lies on the ground, not in it
+	else:
+		_model_pivot.rotation = Vector3(_g_fall_sign * deg_to_rad(-6.0) * e, 0.0, deg_to_rad(4.0) * e)
+		_model_pivot.position = _feet_local + Vector3(0.0, sag_y, 0.0)
 	_toe_l = 0.0
 	_toe_r = 0.0
-	_hand_l = 0.3 * e
-	_hand_r = 0.3 * e
-	_head_pitch = 0.4 * e
-	_head_roll = 0.2 * e
-	_goblin_spine(deg_to_rad(18.0) * e, 0.0, deg_to_rad(8.0) * e, 0.0, 0.0, 0.0)
-	_goblin_pose(deg_to_rad(-8.0) * e, deg_to_rad(6.0) * e, deg_to_rad(15.0) * e, deg_to_rad(10.0) * e,
-		deg_to_rad(-10.0) * e, deg_to_rad(10.0) * e, down, down, deg_to_rad(12.0), deg_to_rad(12.0), 0.0)
+	_hand_l = 0.0
+	_hand_r = 0.0
+	_head_pitch = -0.5 * e + sin(corpse_age * 7.0) * 0.06 * loose
+	_head_roll = 0.25 * e
+	_goblin_spine(-deg_to_rad(26.0) * e, deg_to_rad(5.0) * e, deg_to_rad(7.0) * e, deg_to_rad(8.0) * e, 0.0, 0.0)
+	var down := lerpf(deg_to_rad(goblin_arm_down_degrees), deg_to_rad(82.0), e)
+	var swing := sin(corpse_age * 6.0) * 0.18 * loose
+	_goblin_pose(th[0], th[1], kn[0], kn[1], swing, -swing, down, down, deg_to_rad(10.0), deg_to_rad(10.0), 0.0)
+
+
+# Limb segments for the death simulation: root joint (goblin space), length, and how far it may swing from its parent.
+const _RD_LEN := [0.20, 0.25, 0.20, 0.25, 0.237, 0.34, 0.237, 0.34]
+
+func _rd_root(i: int) -> Vector3:
+	var sx := 1.0 if (i == 0 or i == 1 or i == 4 or i == 5) else -1.0
+	if i < 4:
+		return Vector3(0.117 + goblin_shoulder_widen, 0.948, -0.016) * Vector3(sx, 1.0, 1.0)
+	return Vector3(0.081 * sx, 0.537, 0.018)
+
+
+## Starts the arms and legs flopping: they begin where he stood and are free to swing.
+func _rd_start(push: Vector3) -> void:
+	if _facing_node == null or not goblin_death_fall:
+		_rd_on = false
+		return
+	var mn := _facing_node.global_transform.basis.orthonormalized()
+	var pm := mn.inverse() * push.normalized() if push.length() > 0.01 else Vector3.ZERO
+	_rd_d = []
+	_rd_v = []
+	for i in 8:
+		var sx := 1.0 if (i == 0 or i == 1 or i == 4 or i == 5) else -1.0
+		var d := Vector3.ZERO
+		if i < 4:
+			d = Vector3(0.31 * sx, -0.95, 0.0).normalized()          # arms hang by his sides
+		else:
+			d = Vector3(0.0, -1.0, -0.03).normalized()               # legs straight down
+		_rd_d.append(d)
+		_rd_v.append((-pm - d * (-pm).dot(d)) * 2.0)                 # the shove throws the limbs the other way
+	_rd_ground = global_position.y + _feet_local.y
+	_rd_on = true
+
+
+## One step of the simulation. Every limb segment is a swinging pendulum under gravity (gravity is worked out in the
+## goblin's own space, so it changes direction as he tips over), with loose joints that can only bend so far, a floor
+## the limbs can't go through, and a bounce when he lands.
+func _rd_step(dt: float, landed_now: bool) -> void:
+	if not _rd_on or _facing_node == null or _rd_d.size() != 8:
+		return
+	var mn := _facing_node.global_transform.basis.orthonormalized()
+	var mi := mn.inverse()
+	var g := mi * Vector3.DOWN
+	var scale_w := _model_scale
+	var floor_y := _rd_ground + 0.04
+	var start := Vector3.ZERO
+	for i in 8:
+		var lower := (i % 2) == 1
+		var d: Vector3 = _rd_d[i]
+		var v: Vector3 = _rd_v[i]
+		var parent_d := Vector3.ZERO
+		if lower:
+			parent_d = _rd_d[i - 1]
+			start = start + parent_d * float(_RD_LEN[i - 1])
+		else:
+			start = _rd_root(i)
+		var is_arm := i < 4
+		if landed_now:
+			var up := -g
+			v += (up - d * up.dot(d)) * (3.2 if is_arm else 2.0)
+		var k := 20.0 if is_arm else 16.0
+		var a := (g - d * g.dot(d)) * k
+		if lower:
+			a += (parent_d - d * parent_d.dot(d)) * (4.0 if is_arm else 6.0)      # the elbow and knee want to straighten a little
+		a -= v * 2.4
+		v += a * dt
+		v -= d * v.dot(d)
+		d = (d + v * dt).normalized()
+		# Joint limits: how far this segment may swing from its parent (or, for the upper arm and thigh, from its rest line).
+		var ref: Vector3
+		var max_ang: float
+		if lower:
+			ref = parent_d
+			max_ang = deg_to_rad(140.0 if is_arm else 125.0)
+		elif is_arm:
+			ref = Vector3((1.0 if i == 0 else -1.0), -0.2, 0.0).normalized()
+			max_ang = deg_to_rad(150.0)
+		else:
+			ref = Vector3(0.0, -1.0, 0.0)
+			max_ang = deg_to_rad(80.0)
+		var cosang := clampf(d.dot(ref), -1.0, 1.0)
+		if acos(cosang) > max_ang:
+			var side := d - ref * cosang
+			if side.length() < 0.0001:
+				side = Vector3(0.0, 0.0, 1.0) - ref * ref.z
+			side = side.normalized()
+			d = (ref * cos(max_ang) + side * sin(max_ang)).normalized()
+			v *= 0.3
+		# The floor: if the far end would go below the ground, push the segment up along it.
+		var seg_len := float(_RD_LEN[i])
+		var start_w := _facing_node.global_transform * start
+		var dw := mn * d
+		var min_y := clampf((floor_y - start_w.y) / maxf(seg_len * scale_w, 0.01), -1.0, 1.0)
+		if dw.y < min_y:
+			var hl := Vector2(dw.x, dw.z)
+			var target_h := sqrt(maxf(1.0 - min_y * min_y, 0.0))
+			if hl.length() > 0.0001:
+				hl = hl.normalized() * target_h
+			else:
+				hl = Vector2(target_h, 0.0)
+			dw = Vector3(hl.x, min_y, hl.y)
+			d = (mi * dw).normalized()
+			v *= 0.4
+		_rd_d[i] = d
+		_rd_v[i] = v
 
 
 ## Puts the goblin back on its feet (after respawning).
@@ -1501,6 +1888,10 @@ func _goblin_reset() -> void:
 		return
 	_g_dead = false
 	_g_fall_t = 0.0
+	_g_fall_th = 0.04
+	_g_fall_w = 0.0
+	_g_land_age = -1.0
+	_rd_on = false
 	_g_hit = 0.0
 	_g_move = 0.0
 	_gs.clear()
