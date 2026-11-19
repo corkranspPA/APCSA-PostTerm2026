@@ -180,6 +180,14 @@ var can_see_player := false
 @export_group("Goblin model")
 @export var goblin_enabled := true                 # off = the old blob model, exactly as before
 @export var goblin_scene_path := "res://goblin.glb"
+@export_subgroup("Goblin textures (drag images into these slots)")
+@export var goblin_albedo_texture: Texture2D       # the colour image (goblin_ma_Base_color.jpg)
+@export var goblin_roughness_texture: Texture2D    # optional: goblin_ma_Roughness.jpg
+@export var goblin_metallic_texture: Texture2D     # optional: goblin_ma_Metallic.png
+@export var goblin_translucency_texture: Texture2D # optional: goblin_ma_Translucency.jpg: makes thin parts (ears, fingers) glow a little when light comes through them
+@export var goblin_translucency_strength := 0.35   # how strong that effect is (0 = off)
+@export var goblin_normal_texture: Texture2D       # optional: goblin_ma_Normal_GL.jpg (the model already has its own, so only fill this to replace it)
+@export_subgroup("Goblin texture file paths (only used if the slots above are empty)")
 @export var goblin_albedo_path := "res://goblin_ma_Base_color.jpg"   # the goblin's real colour image (copy goblin_ma_Base_color.jpg from the Blender project into your project)
 @export var goblin_albedo_fallback_path := "res://goblin_albedo.png"  # used if the real colour image isn't there: my painted stand-in
 @export var goblin_roughness_path := "res://goblin_ma_Roughness.jpg"   # optional: leave it out of the project and the model's built-in one is used
@@ -1164,20 +1172,32 @@ func _setup_goblin() -> void:
 			_goblin_mat_shared.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS
 			# The model's own colour map is only grey shading, so it was showing up grey. This is a painted colour map with
 			# the goblin's real colours (green skin, brown shorts, bone skull hat, black beads, silver and gold bands, claws).
-			var tex := _goblin_load_tex(goblin_albedo_path)
+			var tex: Texture2D = goblin_albedo_texture if goblin_albedo_texture != null else _goblin_load_tex(goblin_albedo_path)
 			if tex == null:
 				tex = _goblin_load_tex(goblin_albedo_fallback_path)
 			if tex != null:
 				_goblin_mat_shared.albedo_texture = tex
 				_goblin_mat_shared.albedo_color = Color.WHITE
+				_goblin_mat_shared.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED  # the real colour image is fully opaque
 			else:
 				push_warning("enemy: couldn't find %s (or %s), so the goblin keeps the model's grey look. Copy the goblin's Base_color image into your project." % [goblin_albedo_path, goblin_albedo_fallback_path])
-			var rt := _goblin_load_tex(goblin_roughness_path)
+			var rt: Texture2D = goblin_roughness_texture if goblin_roughness_texture != null else _goblin_load_tex(goblin_roughness_path)
 			if rt != null:
 				_goblin_mat_shared.roughness_texture = rt
 				_goblin_mat_shared.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
 				_goblin_mat_shared.roughness = 1.0
-			var mt := _goblin_load_tex(goblin_metallic_path)
+			var mt: Texture2D = goblin_metallic_texture if goblin_metallic_texture != null else _goblin_load_tex(goblin_metallic_path)
+			var tr: Texture2D = goblin_translucency_texture if goblin_translucency_texture != null else _goblin_load_tex("res://goblin_ma_Translucency.jpg")
+			if tr != null and goblin_translucency_strength > 0.0:
+				_goblin_mat_shared.subsurf_scatter_enabled = true
+				_goblin_mat_shared.subsurf_scatter_strength = goblin_translucency_strength
+				_goblin_mat_shared.subsurf_scatter_texture = tr
+				_goblin_mat_shared.backlight_enabled = true
+				_goblin_mat_shared.backlight = Color(0.55, 0.65, 0.3) * goblin_translucency_strength
+				_goblin_mat_shared.backlight_texture = tr
+			if goblin_normal_texture != null:
+				_goblin_mat_shared.normal_enabled = true
+				_goblin_mat_shared.normal_texture = goblin_normal_texture
 			if mt != null:
 				_goblin_mat_shared.metallic_texture = mt
 				_goblin_mat_shared.metallic_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
