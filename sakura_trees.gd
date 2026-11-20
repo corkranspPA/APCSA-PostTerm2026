@@ -94,6 +94,8 @@ var _logic_ready := false
 var _ready_done := false
 
 var _cells := {}                                       # Vector2i -> { "n", "buf", "scl", "p2" } (where the trees are; cheap)
+var _felled := {}                                      # Vector2i (trunk position x4) -> true: trees the weather knocked down (they stay gone)
+var _sway_on := false                                  # true while some trees are leaning in the wind (so they can be put back straight)
 var _built := {}                                       # Vector2i -> Node3D holding the cell's MultiMeshes (null for a cell with no trees)
 var _bodies := {}                                      # Vector2i -> StaticBody3D with the trunk collision
 var _build_queue: Array[Vector2i] = []
@@ -354,6 +356,8 @@ func _get_cell(key: Vector2i) -> Dictionary:
 			if rad_to_deg(atan(slope_t)) > max_slope_degrees:
 				continue
 
+			if _felled.has(Vector2i(roundi(x * 4.0), roundi(z * 4.0))):
+				continue                                                 # knocked down by the weather earlier
 			var s := lerpf(scale_min, scale_max, sr)
 			# Never inside (or touching) anything else that is solid in the scene.
 			if _physics_ready and _hits_object(x, h, z, s):
@@ -624,3 +628,193 @@ func _free_body(key: Vector2i) -> void:
 	if b != null and is_instance_valid(b):
 		(b as Node).queue_free()
 	_bodies.erase(key)
+
+
+# =====================================================================================================
+# WEATHER HOOKS (used by weather.gd: storms knock trees down and make the ones near you sway in the wind)
+# =====================================================================================================
+@export_group("Weather")
+@export var fall_physics_range := 130.0                # trees knocked down within this distance of you topple for real (further away they just vanish)
+@export var fallen_tree_lifetime := 25.0               # seconds a fallen tree lies there before it fades away
+@export var fallen_tree_damage := 40.0                 # damage to an enemy a falling tree lands on (at full speed)
+@export var sway_range := 90.0                         # trees this close to you sway in the wind
+@export var sway_amount := 1.0                         # 0 = trees never sway, 1 = normal, 2 = double
+
+
+## Positions (world space) of the standing trees within `radius` metres (flat distance) of `centre`.
+func trees_in_radius(centre: Vector3, radius: float) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	if not _ready_done:
+		return out
+	var rc := int(ceil(radius / cell_size)) + 1
+	var c0 := _cell_of(centre)
+	for dx in range(-rc, rc + 1):
+		for dz in range(-rc, rc + 1):
+			var key := Vector2i(c0.x + dx, c0.y + dz)
+			if not _built.has(key) and not _cells.has(key):
+				continue
+			var d := _get_cell(key)
+			var p2: PackedVector2Array = d["p2"]
+			var buf: PackedFloat32Array = d["buf"]
+			for i in p2.size():
+				if Vector2(p2[i].x - centre.x, p2[i].y - centre.z).length() <= radius:
+					out.append(Vector3(p2[i].x, buf[i * 12 + 7], p2[i].y))
+	return out
+
+
+## Knocks down the standing tree closest to `pos` (within `max_dist`). `push` is the direction it falls in.
+## Returns true if a tree was there. The tree topples as a real falling object if it is near you.
+func fell_tree_at(pos: Vector3, push: Vector3 = Vector3.ZERO, max_dist := 3.0) -> bool:
+	if not _ready_done:
+		return false
+	var key := _cell_of(pos)
+	var best_key := Vector2i.ZERO
+	var best_i := -1
+	var best_d := max_dist
+	for dx in range(-1, 2):                             # a trunk close to a cell edge may belong to the next cell
+		for dz in range(-1, 2):
+			var k := Vector2i(key.x + dx, key.y + dz)
+			if not _built.has(k) and not _cells.has(k):
+				continue
+			var p2: PackedVector2Array = _get_cell(k)["p2"]
+			for i in p2.size():
+				var dd := Vector2(p2[i].x - pos.x, p2[i].y - pos.z).length()
+				if dd < best_d:
+					best_d = dd
+					best_i = i
+					best_key = k
+	if best_i < 0:
+		return false
+
+	var d := _get_cell(best_key)
+	var buf: PackedFloat32Array = d["buf"]
+	var scl: PackedFloat32Array = d["scl"]
+	var p2: PackedVector2Array = d["p2"]
+	var o := best_i * 12
+	var basis := Basis(Vector3(buf[o], buf[o + 4], buf[o + 8]), Vector3(buf[o + 1], buf[o + 5], buf[o + 9]), Vector3(buf[o + 2], buf[o + 6], buf[o + 10]))
+	var at := Vector3(p2[best_i].x, buf[o + 7], p2[best_i].y)
+	var s := scl[best_i]
+	_felled[Vector2i(roundi(p2[best_i].x * 4.0), roundi(p2[best_i].y * 4.0))] = true
+
+	# Remove the tree from the cell's lists.
+	var nbuf := PackedFloat32Array()
+	var nscl := PackedFloat32Array()
+	var np2 := PackedVector2Array()
+	for i in p2.size():
+		if i == best_i:
+			continue
+		for j in 12:
+			nbuf.append(buf[i * 12 + j])
+		nscl.append(scl[i])
+		np2.append(p2[i])
+	d["buf"] = nbuf
+	d["scl"] = nscl
+	d["p2"] = np2
+	d["n"] = nscl.size()
+	_cells[best_key] = d
+
+	# Redraw the cell and its trunk collision without that tree.
+	if _built.has(best_key):
+		_free_cell(best_key)
+		_build_cell(best_key)
+	if _bodies.has(best_key):
+		_free_body(best_key)
+		if _body_keep.has(best_key):
+			_build_body(best_key)
+
+	_spawn_falling_tree(at, basis, s, push)
+	return true
+
+
+func _spawn_falling_tree(at: Vector3, basis: Basis, s: float, push: Vector3) -> void:
+	if _meshes.size() < 2:
+		return
+	var f := _focus()
+	if Vector2(at.x - f.x, at.z - f.z).length() > fall_physics_range:
+		return                                          # too far away to matter (the ground has no collision out there)
+	var body := RigidBody3D.new()
+	body.top_level = true
+	body.mass = 400.0 * s
+	body.linear_damp = 0.15
+	body.angular_damp = 0.8
+	body.contact_monitor = true
+	body.max_contacts_reported = 4
+	var sh := CylinderShape3D.new()
+	sh.radius = trunk_radius * s
+	sh.height = trunk_height * s
+	var cs := CollisionShape3D.new()
+	cs.shape = sh
+	cs.position = Vector3(0, sh.height * 0.5, 0)
+	body.add_child(cs)
+	var mi := MeshInstance3D.new()
+	mi.mesh = _meshes[1]
+	mi.basis = basis
+	mi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	body.add_child(mi)
+	add_child(body)
+	body.global_position = at
+	var dir := push
+	dir.y = 0.0
+	if dir.length() < 0.01:
+		dir = Vector3(randf_range(-1.0, 1.0), 0.0, randf_range(-1.0, 1.0))
+	dir = dir.normalized()
+	body.apply_impulse(dir * body.mass * 1.6, Vector3(0, sh.height * 0.9, 0))   # a shove near the top: the tree topples over
+	var hit := {"done": false}
+	body.body_entered.connect(func(other: Node) -> void:
+		if hit["done"] or other == null or not other.is_in_group("enemy") or not other.has_method("take_damage"):
+			return
+		var sp := body.linear_velocity.length()
+		if sp < 2.0:
+			return
+		hit["done"] = true
+		other.take_damage(fallen_tree_damage * clampf(sp / 8.0, 0.3, 1.5), (other as Node3D).global_position, body))
+	var tw := create_tween()
+	tw.tween_interval(maxf(fallen_tree_lifetime, 1.0))
+	tw.tween_property(mi, "scale", Vector3(0.01, 0.01, 0.01), 2.5)
+	tw.tween_callback(body.queue_free)
+
+
+## Leans the trees near you in the wind. `wind` is the wind's push (metres per second, direction = where it blows to),
+## `t` is time in seconds. Called a few times a second by weather.gd. Costs a little for the cells close to you only.
+func apply_wind(wind: Vector3, t: float) -> void:
+	if not _ready_done:
+		return
+	var w2 := Vector2(wind.x, wind.z)
+	var power := clampf(w2.length() / 12.0, 0.0, 2.0) * sway_amount
+	if power < 0.01 and not _sway_on:
+		return
+	_sway_on = power >= 0.01
+	var axis := Vector3.UP.cross(Vector3(wind.x, 0.0, wind.z).normalized()) if w2.length() > 0.01 else Vector3.RIGHT
+	var f := _focus()
+	var fc := Vector2(f.x, f.z)
+	for key in _built.keys():
+		var holder = _built[key]
+		if holder == null or not is_instance_valid(holder):
+			continue
+		var cc := _cell_centre(key)
+		if Vector2(cc.x, cc.z).distance_to(fc) > sway_range + cell_size:
+			continue
+		var d := _get_cell(key)
+		var n: int = d["n"]
+		if n == 0:
+			continue
+		var buf: PackedFloat32Array = d["buf"]
+		var p2: PackedVector2Array = d["p2"]
+		var out := buf.duplicate()
+		if power >= 0.01:
+			for i in n:
+				var o := i * 12
+				var ph := p2[i].x * 0.37 + p2[i].y * 0.53
+				var gust := sin(t * 1.3 + ph) * 0.5 + 0.5
+				var flutter := sin(t * 3.1 + ph * 1.7) * 0.25
+				var ang := power * (0.03 + 0.05 * gust + 0.02 * flutter)
+				var b := Basis(Vector3(buf[o], buf[o + 4], buf[o + 8]), Vector3(buf[o + 1], buf[o + 5], buf[o + 9]), Vector3(buf[o + 2], buf[o + 6], buf[o + 10]))
+				var nb := Basis(axis, ang) * b
+				out[o] = nb.x.x; out[o + 1] = nb.y.x; out[o + 2] = nb.z.x
+				out[o + 4] = nb.x.y; out[o + 5] = nb.y.y; out[o + 6] = nb.z.y
+				out[o + 8] = nb.x.z; out[o + 9] = nb.y.z; out[o + 10] = nb.z.z
+		for ch in (holder as Node).get_children():
+			if ch is MultiMeshInstance3D and (ch as MultiMeshInstance3D).multimesh != null:
+				var mm := (ch as MultiMeshInstance3D).multimesh
+				if mm.instance_count == n:
+					mm.buffer = out
