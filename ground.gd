@@ -73,8 +73,9 @@ extends Node3D
 # COLOURS (painted into the terrain; multiplied with the grass texture if you add one)
 # -------------------------
 @export_group("Colours")
-@export var grass_color_a := Color(0.36, 0.58, 0.22)
-@export var grass_color_b := Color(0.55, 0.66, 0.26)   # grass patches blend between the two colours
+@export var grass_color_a := Color(0.30, 0.68, 0.14)
+@export var grass_color_b := Color(0.52, 0.78, 0.18)   # grass patches blend between the two colours
+@export_range(0.5, 3.0) var grass_brightness := 1.3    # NEW: brightens the whole ground (your grass texture is dark; raise this for brighter, livelier grass)
 @export var rock_color := Color(0.44, 0.42, 0.41)
 @export var snow_color := Color(0.93, 0.95, 0.98)
 @export_range(0.0, 1.0) var rock_slope := 0.85         # steeper than this turns to rock (higher = more rock)
@@ -88,7 +89,7 @@ extends Node3D
 @export var grass_texture: Texture2D                   # drop your seamless grass image here (empty = plain painted colours)
 @export var grass_normal_texture: Texture2D            # optional bump map for the grass
 @export_range(0.0, 4.0) var grass_normal_strength := 1.0
-@export_range(0.0, 1.0) var grass_color_strength := 0.65   # with a texture: how strongly the painted colours tint it (0 = pure texture)
+@export_range(0.0, 1.0) var grass_color_strength := 0.85   # with a texture: how strongly the painted colours tint it (0 = pure texture)
 @export var grass_tile_meters := 4.0                   # how many metres one copy of the texture covers (smaller = finer grass)
 @export_range(0.0, 1.0) var grass_roughness := 1.0
 
@@ -693,6 +694,7 @@ func _make_material() -> StandardMaterial3D:
 	m.vertex_color_use_as_albedo = true
 	m.vertex_color_is_srgb = true
 	m.roughness = grass_roughness
+	m.albedo_color = Color(grass_brightness, grass_brightness, grass_brightness)
 	m.metallic_specular = 0.2
 	if grass_texture != null:
 		m.albedo_texture = grass_texture

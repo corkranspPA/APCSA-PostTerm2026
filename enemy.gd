@@ -61,6 +61,7 @@ var look_target := Vector3.ZERO           # world position of whoever shot it
 @export var attack_recover := 0.22       # CHANGED (was 0.6): vulnerable recovery after the lunge
 @export var attack_cooldown := 0.0       # CHANGED (was 1.2): extra wait before it can attack again
 @export var attack_damage := 20.0
+@export var attack_debug := false          # prints in the Output panel why a swipe missed (too far, or out of vertical reach)
 @export var attack_hit_radius := 3.0     # CHANGED (was 1.8): how close the player must be during the lunge to get hit
 @export var attack_knockback := 9.0
 
@@ -332,7 +333,7 @@ func _physics_process(delta: float) -> void:
 	# sight check) and no matter where you are relative to its view cone.
 	if state != State.ATTACKING and attack_cooldown_timer <= 0.0 and player.get("is_dead") != true:
 		var stl = player.get("stealth_timer")
-		if not (stl != null and stl > 0.0) and _flat_distance_to_player() <= attack_range + 0.3 and absf(player.global_position.y - global_position.y) < 2.5:
+		if not (stl != null and stl > 0.0) and _flat_distance_to_player() <= attack_range + 0.3 and _player_in_vertical_reach():
 			_start_attack()
 
 	# He tries again: while he is still hunting you (you got away, or he lost you and found his feet), he goes straight back to chasing.
@@ -579,10 +580,31 @@ func _process_attack(delta: float) -> void:
 
 func _player_in_hit_range() -> bool:
 	var d = player.global_position - global_position
-	if absf(d.y) > 2.5:   # CHANGED (was 1.8): slopes and hops no longer make the lunge whiff
+	if not _player_in_vertical_reach():   # slopes, hops and walls: compares the player's real body, not the node's origin
+		if attack_debug:
+			print("goblin swipe missed: player is out of vertical reach")
 		return false
 	d.y = 0
+	if attack_debug and d.length() > attack_hit_radius:
+		print("goblin swipe missed: too far (", snappedf(d.length(), 0.01), " > ", attack_hit_radius, ")")
 	return d.length() <= attack_hit_radius
+
+## True when the player's body (their capsule, top to bottom) overlaps the height the goblin can reach, from a little below
+## his feet to well above his head. Using the capsule instead of the player node's origin means it no longer matters
+## where on the player the origin sits (feet, centre or camera).
+func _player_in_vertical_reach() -> bool:
+	var lo: float = player.global_position.y
+	var hi: float = player.global_position.y
+	var col = player.get("collision")
+	if col is CollisionShape3D and (col as CollisionShape3D).shape is CapsuleShape3D:
+		var half: float = ((col as CollisionShape3D).shape as CapsuleShape3D).height * 0.5
+		lo = (col as CollisionShape3D).global_position.y - half
+		hi = (col as CollisionShape3D).global_position.y + half
+	else:
+		lo -= 1.0
+		hi += 1.0
+	var feet: float = global_position.y + _feet_local.y
+	return hi >= feet - 1.2 and lo <= feet + 4.0
 
 func _deal_attack_damage() -> void:
 	# If the player is mid-dash (i-frames), the lunge whiffs — keep checking

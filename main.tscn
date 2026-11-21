@@ -1,5 +1,6 @@
 [gd_scene format=3 uid="uid://cqow47bch5ocs"]
 
+[ext_resource type="Script" uid="uid://b0mqp2rns6nyr" path="res://sky_cycle.gd" id="1_074og"]
 [ext_resource type="Script" uid="uid://b0gd8hrqpvtbb" path="res://player.gd" id="1_ig7tw"]
 [ext_resource type="Script" uid="uid://kk8nidj4yyk0" path="res://weather.gd" id="1_yaehf"]
 [ext_resource type="Script" uid="uid://ly8por15wthv" path="res://fps_shooter.gd" id="4_7mycd"]
@@ -60,7 +61,7 @@ material = SubResource("StandardMaterial3D_vivmo")
 [node name="Node3D" type="Node3D" unique_id=1205225603]
 
 [node name="DayNightCycle" type="Node3D" parent="." unique_id=1911056165]
-script = ExtResource("1_yaehf")
+script = ExtResource("1_074og")
 
 [node name="sun" type="DirectionalLight3D" parent="." unique_id=1230024567]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 0)
@@ -184,21 +185,32 @@ script = ExtResource("11_efxa6")
 
 [node name="unsure but dont delete" type="Node" parent="." unique_id=1451125049]
 
-[node name="natural_lighting" type="Node" parent="." unique_id=1817627444]
+[node name="natural_lighting" type="Node" parent="." unique_id=1817627444 node_paths=PackedStringArray("world_env", "sun", "moon")]
 script = ExtResource("14_w48qg")
+world_env = NodePath("../WorldEnvironment")
+sun = NodePath("../sun")
+moon = NodePath("../moon")
 
-[node name="ground" type="Node3D" parent="." unique_id=1637826285]
+[node name="ground" type="Node3D" parent="." unique_id=1637826285 node_paths=PackedStringArray("player")]
 script = ExtResource("14_vivmo")
+player = NodePath("../Player")
 grass_texture = ExtResource("8_ycdy4")
 
 [node name="enemy spawner" type="Node3D" parent="." unique_id=1234266323]
 script = ExtResource("16_2cqfq")
 
-[node name="sakura trees" type="Node3D" parent="." unique_id=1408846149]
+[node name="sakura trees" type="Node3D" parent="." unique_id=1408846149 node_paths=PackedStringArray("terrain", "player")]
 script = ExtResource("17_yaehf")
+terrain = NodePath("../ground")
+player = NodePath("../Player")
 
 [node name="performance" type="Node" parent="." unique_id=1651693110]
 script = ExtResource("18_074og")
 
-[node name="infinite terrain" type="Node3D" parent="." unique_id=216506239]
+[node name="infinite terrain" type="Node3D" parent="." unique_id=216506239 node_paths=PackedStringArray("terrain", "player")]
 script = ExtResource("19_cegan")
+terrain = NodePath("../ground")
+player = NodePath("../Player")
+
+[node name="weather" type="Node3D" parent="." unique_id=1961578505]
+script = ExtResource("1_yaehf")

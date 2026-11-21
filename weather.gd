@@ -15,6 +15,10 @@ extends Node3D
 @export_group("General")
 @export var weather_enabled := true
 @export var auto_weather := true                    # the weather changes by itself (off = it stays on start_weather)
+@export var patchy_weather := true                  # the world is mostly sunny, with patches of other weather you walk into and out of (off = one weather everywhere, changing over time)
+@export_range(0.3, 0.95) var sunny_fraction := 0.64  # how much of the world is clear (0.64 = roughly two thirds sunny, a bit more with the cloudy patch edges). Lower = more weather patches
+@export var patch_size := 650.0                     # roughly how wide a weather patch is, in metres (bigger = larger patches, further apart)
+@export var patch_drift_speed := 1.5                # metres per second the patches slowly blow across the land (0 = they stay put)
 @export var start_weather := "clear"
 @export var min_duration := 120.0                   # each kind of weather lasts between these many seconds
 @export var max_duration := 360.0
@@ -31,12 +35,24 @@ extends Node3D
 @export var cloud_speed := 0.012                    # how fast clouds drift (scaled by the wind)
 @export var cloud_scale := 1.0                      # bigger = larger cloud shapes
 @export var storm_darkness := 0.85                  # how dark and grey storm skies and light get (0..1)
+@export_range(0.0, 1.0) var sun_hidden_by_clouds := 0.3     # how much the thickest storm cloud fades your sun and moon sprites (0 = they are never faded, 1 = fully hidden)
+@export_group("Sunshine and colour")
+@export var sunshine_enabled := true                # the sun's light and its disc cut through light weather (only thick clouds and severe weather block it)
+@export_range(0.0, 3.0) var sunshine_strength := 0.6   # how much stronger the sunlight gets when nothing is blocking it (0 = off, 1 = double)
+@export_range(0.0, 2.0) var sun_disc_brightness := 1.0 # how bright your sun picture looks when it shines through (1 = unchanged)
+@export_enum("auto", "always", "never") var own_sun_disc := "auto"   # draws a sun in the sky if your sky script has none ("auto" = only when its sun picture is missing, "always" = draw this one too, "never" = off)
+@export var hide_light_discs := true                # stops every light from drawing its own disc in the sky (those show up as black blobs). Your sun and moon pictures are the only ones drawn.
+@export_range(0.0, 1.0) var vibrance := 0.22        # makes the whole picture more colourful (0 = off). Eases off in severe weather.
+@export_group("Weather look")
+@export_range(0.0, 2.0) var extra_brightness := 0.12    # lifts the shadow-fill light in every weather (raise it if the world still feels dark, 0 = off)
+@export_range(0.0, 1.0) var weather_dimming := 0.4   # how much the weather darkens the world overall (0 = weather never makes it darker, 1 = full storm gloom)
+@export_range(0.0, 1.0) var overcast_fill := 0.3      # clouds scatter light: extra soft shadow-fill light when it is overcast, so the ground never goes black
 
 @export_group("Wind")
 @export var wind_yaw_degrees := 40.0                # the starting wind direction (it slowly drifts)
 @export var wind_drift := 0.5                       # how much the wind direction wanders
 @export var gust_strength := 0.45                   # 0 = steady wind, 1 = very gusty
-@export var tree_sway_degrees := 5.0                # how far trees lean in a strong wind (0 = off)
+@export var tree_sway_degrees := 7.0                # how far trees lean in a strong wind (0 = off)
 @export var tree_sway_distance := 85.0              # only trees this close to you sway (it costs a little)
 @export var petals_in_wind := true                  # blossoms and leaves blown through the air
 @export var wind_pushes_creatures := 0.0            # metres per second of push at gale strength on you and the enemies (0 = none)
@@ -128,6 +144,20 @@ var soil_saturation := 0.0                          # 0..1: soaked soil (drives 
 var _cur := {"cloud": 0.1, "dark": 0.0, "rain": 0.0, "hail": 0.0, "snow": 0.0, "fog": 0.0, "wind": 2.0, "bolts": 0.0, "tornado": 0.0}
 var _tgt := {}
 var _weather_timer := 0.0
+var _disc_guard_timer := 0.0
+var _resolve_timer := 0.0
+var _resolve_tries := 0
+var _own_sun: Sprite3D
+var _sun_warned := false
+var _vib_base := 1.0
+var _vib_written := -1.0
+var _manual_hold := 0.0                             # seconds the weather you picked by hand (F6 / set_weather) stays before patches take over again
+var _patch_noise_a := FastNoiseLite.new()
+var _patch_noise_b := FastNoiseLite.new()
+var _patch_offset := Vector2.ZERO
+var _patch_timer := 0.0
+var _patch_pending := ""
+var _patch_pending_count := 0
 var _find_timer := 0.0
 var _t := 0.0
 var _noise := FastNoiseLite.new()
@@ -162,6 +192,7 @@ var _thunder_queue: Array = []
 
 # trees
 var _sway_timer := 0.0
+var _sway_smooth := 0.0
 var _topple_timer := 0.0
 var _props: Array = []
 var _tree_mesh_cache: Mesh
@@ -209,6 +240,11 @@ func _ready() -> void:
 	_rng.randomize()
 	_noise.seed = _rng.randi()
 	_noise.frequency = 1.0
+	_patch_noise_a.seed = _rng.randi()
+	_patch_noise_a.frequency = 1.0
+	_patch_noise_b.seed = _rng.randi()
+	_patch_noise_b.frequency = 1.0
+	_patch_offset = Vector2(_rng.randf_range(-500.0, 500.0), _rng.randf_range(-500.0, 500.0))
 	_wind_yaw = deg_to_rad(wind_yaw_degrees)
 	if not weather_enabled:
 		set_process(false)
@@ -216,6 +252,7 @@ func _ready() -> void:
 		return
 	_find_things()
 	_make_dome()
+	_make_own_sun()
 	_make_particles()
 	_make_tornado()
 	_make_puddle_material()
@@ -228,6 +265,30 @@ func _ready() -> void:
 		_spawn_tornado()
 
 
+## Picks up the sun, moon, sky and environment from the sky script. The sky script only finds its own sun and builds its sky
+## in its _ready, which can run AFTER this script's when the Weather node sits above it in the scene tree, so this is
+## tried again (see _process) until everything is there.
+func _resolve_sky() -> void:
+	if sky_cycle != null:
+		var sv = sky_cycle.get("sun")
+		if sv is DirectionalLight3D:
+			_sun = sv
+		var mv = sky_cycle.get("moon")
+		if mv is DirectionalLight3D:
+			_moon = mv
+		var we = sky_cycle.get("world_env")
+		if we is WorldEnvironment and (we as WorldEnvironment).environment != null:
+			_env = (we as WorldEnvironment).environment
+		var sm = sky_cycle.get("sky_mat")
+		if sm is ShaderMaterial:
+			_skymat = sm
+	var root := get_tree().current_scene
+	if root != null and _sun == null:
+		_sun = root.find_child("Sun", true, false) as DirectionalLight3D
+	if root != null and _moon == null:
+		_moon = root.find_child("Moon", true, false) as DirectionalLight3D
+
+
 func _find_things() -> void:
 	var root := get_tree().current_scene
 	if root == null:
@@ -237,15 +298,7 @@ func _find_things() -> void:
 			if "sky_mat" in n and "sun_sprite" in n:
 				sky_cycle = n
 				break
-	if sky_cycle != null:
-		_sun = sky_cycle.get("sun")
-		_moon = sky_cycle.get("moon")
-		var we = sky_cycle.get("world_env")
-		if we is WorldEnvironment:
-			_env = (we as WorldEnvironment).environment
-		var sm = sky_cycle.get("sky_mat")
-		if sm is ShaderMaterial:
-			_skymat = sm
+	_resolve_sky()
 	if _env == null:
 		for n in root.find_children("*", "WorldEnvironment", true, false):
 			_env = (n as WorldEnvironment).environment
@@ -275,6 +328,7 @@ func set_weather(weather_name: String) -> void:
 	if PRESETS.has(weather_name):
 		_apply_weather(weather_name, false)
 		_weather_timer = _rng.randf_range(min_duration, max_duration)
+		_manual_hold = _weather_timer
 
 
 func next_weather() -> void:
@@ -295,6 +349,67 @@ func _apply_weather(weather_name: String, instant: bool) -> void:
 		_tgt["snow"] = 0.0
 	if _tgt["tornado"] > 0.5 and not instant and not _tor_active:
 		_spawn_tornado()
+
+
+## Weather patches: the land is mostly sunny. Two slow noise maps decide, for wherever you are standing, whether you are
+## in a patch of bad weather (and which kind and how strong). The patches drift slowly across the land with the wind,
+## so you can walk out of the rain into sunshine, or a storm can roll over you.
+func _weather_at(pos: Vector2) -> String:
+	var q := (pos + _patch_offset) / maxf(patch_size, 50.0)
+	var v := clampf(0.5 + _patch_noise_a.get_noise_2d(q.x, q.y) * 0.9, 0.0, 1.0)
+	if v < sunny_fraction - 0.07:
+		return "clear"
+	if v < sunny_fraction:
+		return "cloudy"                       # the thin edge of a patch: clouds gather before the weather arrives
+	var strength := clampf((v - sunny_fraction) / maxf(1.0 - sunny_fraction, 0.05), 0.0, 1.0)   # 0 at the edge, 1 in the heart
+	var kind := clampf(0.5 + _patch_noise_b.get_noise_2d(q.x * 0.6 + 40.0, q.y * 0.6 - 40.0) * 0.9, 0.0, 1.0)   # 0..1: which kind of patch this is
+	var out := "cloudy"
+	if kind < 0.47:
+		out = "drizzle" if strength < 0.3 else ("rain" if strength < 0.7 else "storm")
+		if out == "storm" and strength > 0.93:
+			out = "tornado"
+	elif kind < 0.54:
+		out = "fog"
+	elif kind < 0.66:
+		out = "snow" if strength < 0.7 else "blizzard"
+	elif kind < 0.80:
+		out = "windstorm" if strength > 0.5 else "cloudy"
+	else:
+		out = "hail" if strength > 0.4 else "rain"
+	if severity <= 0.0 and SEVERE.has(out):
+		out = {"storm": "rain", "hail": "rain", "tornado": "rain", "blizzard": "snow", "windstorm": "cloudy"}.get(out, "cloudy")
+	elif severity < 1.0 and (out == "tornado" or out == "hail") and _rng.randf() > severity:
+		out = "storm" if out == "tornado" else "rain"
+	return out
+
+
+func _update_patches(delta: float) -> void:
+	_patch_offset += Vector2(wind_direction.x, wind_direction.z) * patch_drift_speed * delta
+	if _manual_hold > 0.0:
+		return
+	_patch_timer -= delta
+	if _patch_timer > 0.0:
+		return
+	_patch_timer = 1.5
+	var here := Vector3.ZERO
+	if player != null:
+		here = player.global_position
+	elif _cam != null:
+		here = _cam.global_position
+	var w := _weather_at(Vector2(here.x, here.z))
+	if w == current_weather:
+		_patch_pending = ""
+		_patch_pending_count = 0
+		return
+	if w == _patch_pending:
+		_patch_pending_count += 1
+	else:
+		_patch_pending = w
+		_patch_pending_count = 1
+	if _patch_pending_count >= 2:               # it has to stay different for a few seconds, so the weather never flickers at a patch edge
+		_apply_weather(w, false)
+		_patch_pending = ""
+		_patch_pending_count = 0
 
 
 func _pick_next_weather() -> String:
@@ -329,6 +444,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				strike_lightning(Vector3.ZERO, true)
 			KEY_F8:
 				_spawn_tornado()
+			KEY_F9:
+				_print_sun_report()
+			KEY_F10:
+				if sky_cycle != null and sky_cycle.has_method("set_time_of_day"):
+					sky_cycle.call("set_time_of_day", 0.5)
+					print("Weather: jumped to noon")
 
 
 # =====================================================================================================
@@ -350,11 +471,15 @@ func _process(delta: float) -> void:
 	var k := 1.0 - exp(-delta / maxf(transition_time / 3.0, 0.05))
 	for key in _tgt:
 		_cur[key] = lerpf(float(_cur[key]), float(_tgt[key]), k)
+	_manual_hold = maxf(_manual_hold - delta, 0.0)
 	if auto_weather:
-		_weather_timer -= delta
-		if _weather_timer <= 0.0:
-			_weather_timer = _rng.randf_range(min_duration, max_duration)
-			_apply_weather(_pick_next_weather(), false)
+		if patchy_weather:
+			_update_patches(delta)
+		else:
+			_weather_timer -= delta
+			if _weather_timer <= 0.0:
+				_weather_timer = _rng.randf_range(min_duration, max_duration)
+				_apply_weather(_pick_next_weather(), false)
 
 	_update_wind(delta)
 	var rain: float = _cur["rain"]
@@ -365,6 +490,20 @@ func _process(delta: float) -> void:
 	_flash = maxf(_flash - delta * 2.2, 0.0)
 	_shake = maxf(_shake - delta * 1.6, 0.0)
 
+	if (_sun == null or _skymat == null or _env == null) and _resolve_tries < 120:
+		_resolve_timer -= delta
+		if _resolve_timer <= 0.0:
+			_resolve_timer = 0.5
+			_resolve_tries += 1
+			_resolve_sky()
+			if sky_cycle == null:
+				_find_things()
+			if _resolve_tries == 120 and _sun == null:
+				push_warning("Weather: never found the sun light. Assign Sky Cycle on the Weather node (or name your sun light 'Sun').")
+	_disc_guard_timer -= delta
+	if hide_light_discs and _disc_guard_timer <= 0.0:
+		_disc_guard_timer = 1.0
+		_guard_light_discs()
 	_update_light_level()
 	_apply_atmosphere()
 	_update_dome(delta)
@@ -386,6 +525,119 @@ func _update_wind(delta: float) -> void:
 	wind_speed = maxf(float(_cur["wind"]) * gust, 0.0)
 
 
+## A directional light draws its own bright (or, at zero energy, black) disc in the sky unless its sky mode is "light only".
+## The sky script sets that for the sun and moon, but lights made by other scripts (the sky-fill light shining down from
+## straight overhead, the ground-bounce light, and so on) can still draw a black blob. This switches all of them to "light only".
+func _guard_light_discs() -> void:
+	var root := get_tree().current_scene
+	if root == null:
+		return
+	for n in root.find_children("*", "DirectionalLight3D", true, false):
+		var dl := n as DirectionalLight3D
+		if dl.sky_mode != DirectionalLight3D.SKY_MODE_LIGHT_ONLY:
+			dl.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
+
+
+## The sun picture the sky script draws needs res://sun.png. If it is missing, there is no sun at all, so this draws a simple
+## glowing one (own_sun_disc). F9 prints where the sun is and whether the sky script's sun picture exists.
+func _make_own_sun() -> void:
+	if own_sun_disc == "never":
+		return
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.26, 0.3, 0.55, 1.0])
+	g.colors = PackedColorArray([Color(1.0, 0.98, 0.8, 1.0), Color(1.0, 0.96, 0.7, 1.0), Color(1.0, 0.88, 0.5, 0.55), Color(1.0, 0.8, 0.4, 0.18), Color(1.0, 0.75, 0.35, 0.0)])
+	var gt := GradientTexture2D.new()
+	gt.gradient = g
+	gt.fill = GradientTexture2D.FILL_RADIAL
+	gt.fill_from = Vector2(0.5, 0.5)
+	gt.fill_to = Vector2(1.0, 0.5)
+	gt.width = 256
+	gt.height = 256
+	_own_sun = Sprite3D.new()
+	_own_sun.name = "WeatherSun"
+	_own_sun.texture = gt
+	_own_sun.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_own_sun.shaded = false
+	_own_sun.double_sided = true
+	_own_sun.transparent = true
+	_own_sun.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_own_sun.top_level = true
+	_own_sun.visible = false
+	var sprite_dist := 900.0
+	var size_deg := 9.0
+	if sky_cycle != null:
+		sprite_dist = float(sky_cycle.get("sprite_distance")) if sky_cycle.get("sprite_distance") != null else 900.0
+		size_deg = float(sky_cycle.get("sun_size_degrees")) if sky_cycle.get("sun_size_degrees") != null else 9.0
+	var found := _find_sun_texture()
+	if found != null:
+		# your own sun picture, found by name (e.g. "sun-1.png.png"), because the sky script only loads exactly res://sun.png
+		_own_sun.texture = found
+		_own_sun.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		_own_sun.pixel_size = 2.0 * sprite_dist * tan(deg_to_rad(size_deg) * 0.5) / float(maxi(found.get_width(), found.get_height()))
+	else:
+		_own_sun.pixel_size = 2.0 * sprite_dist * tan(deg_to_rad(size_deg * 3.4) * 0.5) / 256.0
+	_own_sun.set_meta("dist", sprite_dist)
+	add_child(_own_sun)
+
+
+## Looks in res:// for a picture whose name has "sun" in it (sun.png, sun-1.png.png, Sun.webp ...), for the sky script's sun.
+func _find_sun_texture() -> Texture2D:
+	if sky_cycle != null and sky_cycle.get("sun_texture") is Texture2D:
+		return sky_cycle.get("sun_texture") as Texture2D
+	var dir := DirAccess.open("res://")
+	if dir == null:
+		return null
+	for f in dir.get_files():
+		var fn := String(f)
+		if fn.ends_with(".import"):
+			fn = fn.trim_suffix(".import")
+		elif fn.ends_with(".remap"):
+			fn = fn.trim_suffix(".remap")
+		var low := fn.to_lower()
+		if low.contains("sun") and (low.ends_with(".png") or low.ends_with(".webp") or low.ends_with(".jpg") or low.ends_with(".jpeg")):
+			if ResourceLoader.exists("res://" + fn):
+				var t = load("res://" + fn)
+				if t is Texture2D:
+					return t as Texture2D
+	return null
+
+
+func _update_own_sun(sun_h: float, cloud: float) -> void:
+	if _own_sun == null or _sun == null:
+		return
+	var theirs = sky_cycle.get("sun_sprite") if sky_cycle != null else null
+	var want := own_sun_disc == "always" or (own_sun_disc == "auto" and theirs == null)
+	if own_sun_disc == "auto" and theirs == null and not _sun_warned:
+		_sun_warned = true
+		push_warning("Weather: your sky script has no sun picture (it only loads exactly res://sun.png), so a sun is drawn here instead, using any picture in res:// with sun in its name, or a plain glowing one. Set own_sun_disc to never to turn this off.")
+	var a := smoothstep(-0.08, 0.05, sun_h) * (1.0 - smoothstep(0.7, 1.0, cloud) * sun_hidden_by_clouds)
+	_own_sun.visible = want and a > 0.01
+	if not _own_sun.visible:
+		return
+	var cam := get_viewport().get_camera_3d()
+	var cp := cam.global_position if cam else Vector3.ZERO
+	_own_sun.global_position = cp + _sun.global_transform.basis.z.normalized() * float(_own_sun.get_meta("dist"))
+	_own_sun.modulate = Color(1, 1, 1, a)
+
+
+func _print_sun_report() -> void:
+	if _sun == null:
+		print("Weather: no sun light found")
+		return
+	var d := _sun.global_transform.basis.z.normalized()
+	var elev := rad_to_deg(asin(clampf(d.y, -1.0, 1.0)))
+	var az := rad_to_deg(atan2(d.x, d.z))
+	var cam := get_viewport().get_camera_3d()
+	var face := 0.0
+	if cam != null:
+		var f := -cam.global_transform.basis.z
+		face = rad_to_deg(atan2(f.x, f.z))
+	var sp = sky_cycle.get("sun_sprite") if sky_cycle != null else null
+	print("Sun: height ", snappedf(elev, 0.1), " deg above the horizon, direction ", snappedf(az, 1.0), " deg; you face ", snappedf(face, 1.0), " deg (turn to match the direction to see it)")
+	print("Sky script's sun picture: ", "MISSING (no sun.png)" if sp == null else ("shown, alpha " + str(snappedf((sp as Sprite3D).modulate.a, 0.01))))
+	print("Weather now: ", current_weather, " | own sun disc: ", own_sun_disc, " | F10 jumps to noon")
+
+
 func _update_light_level() -> void:
 	var h := 1.0
 	if _sun != null:
@@ -398,17 +650,39 @@ func _update_light_level() -> void:
 # =====================================================================================================
 func _apply_atmosphere() -> void:
 	var cloud: float = _cur["cloud"]
-	var dark: float = float(_cur["dark"]) * storm_darkness
+	var dark: float = float(_cur["dark"]) * storm_darkness * weather_dimming
 	var flash := _flash
+
+	# How much the sun is getting through: only thick cloud and severe weather (storm, hail, tornado, blizzard, gales) stop it.
+	var sun_h := 0.0
+	if _sun != null:
+		sun_h = _sun.global_transform.basis.z.y
+	var severe := clampf(maxf(maxf(float(_cur["bolts"]) / 4.0, float(_cur["hail"])), maxf(float(_cur["tornado"]), smoothstep(14.0, 24.0, float(_cur["wind"])))), 0.0, 1.0)
+	var shine := 0.0
+	if sunshine_enabled:
+		shine = smoothstep(0.02, 0.3, sun_h) * (1.0 - smoothstep(0.45, 0.95, cloud)) * (1.0 - severe)
 
 	if _sun != null:
 		_sun.light_energy *= lerpf(1.0, 0.3, dark * 0.9)
+		_sun.light_energy *= 1.0 + sunshine_strength * shine
+		_sun.light_color = _sun.light_color.lerp(Color(1.0, 0.95, 0.82), shine * 0.5)
 		if flash > 0.0:
 			_sun.light_energy += flash * 0.6
 	if _moon != null:
 		_moon.light_energy *= lerpf(1.0, 0.3, dark)
 	if _env != null:
-		_env.ambient_light_energy = _env.ambient_light_energy * lerpf(1.0, 0.92, dark) + flash * 2.2
+		_env.ambient_light_energy = _env.ambient_light_energy * (lerpf(1.0, 0.92, dark) + cloud * overcast_fill) + flash * 2.2
+		_env.ambient_light_energy += extra_brightness * 0.6 + shine * sunshine_strength * 0.2
+		# more colour in everything (the sky script resets saturation every frame; this also guards against stacking if it doesn't)
+		var cur_s: float = _env.adjustment_saturation
+		if absf(cur_s - _vib_written) < 0.00001:
+			cur_s = _vib_base
+		else:
+			_vib_base = cur_s
+		_vib_written = cur_s * (1.0 + vibrance * (1.0 - severe * 0.6))
+		_env.adjustment_enabled = true
+		_env.adjustment_saturation = _vib_written
+		_env.adjustment_brightness = 1.0 + vibrance * 0.12 * (1.0 - severe)
 
 	if _skymat != null:
 		var storm_top := Color(0.3, 0.33, 0.38) * lerpf(0.3, 1.0, _light_level)
@@ -431,14 +705,18 @@ func _apply_atmosphere() -> void:
 		for p in ["star_amount", "sun_aura_amount", "moon_aura_amount"]:
 			var v = _skymat.get_shader_parameter(p)
 			if v is float:
-				_skymat.set_shader_parameter(p, float(v) * (1.0 - clampf(cloud * 1.1, 0.0, 1.0)))
+				var keep := (1.0 - clampf(cloud * 1.1, 0.0, 1.0)) if p == "star_amount" else (1.0 - cloud * 0.3)   # clouds hide the stars, but your sun and moon glow stays
+				_skymat.set_shader_parameter(p, float(v) * keep)
+	_update_own_sun(sun_h, cloud)
 	if sky_cycle != null:
 		var ss = sky_cycle.get("sun_sprite")
 		if ss is Sprite3D:
-			(ss as Sprite3D).modulate.a *= (1.0 - smoothstep(0.55, 1.0, cloud) * 0.95)
+			var bright := lerpf(1.0, sun_disc_brightness, shine)
+			var sc := ss as Sprite3D
+			sc.modulate = Color(bright, bright, bright, sc.modulate.a * (1.0 - smoothstep(0.7, 1.0, cloud) * sun_hidden_by_clouds))
 		var ms = sky_cycle.get("moon_sprite")
 		if ms is Sprite3D:
-			(ms as Sprite3D).modulate.a *= (1.0 - smoothstep(0.55, 1.0, cloud) * 0.95)
+			(ms as Sprite3D).modulate.a *= (1.0 - smoothstep(0.7, 1.0, cloud) * sun_hidden_by_clouds)
 		var mh = sky_cycle.get("moon_halo")
 		if mh is MeshInstance3D and cloud > 0.6:
 			(mh as MeshInstance3D).visible = false
@@ -447,7 +725,7 @@ func _apply_atmosphere() -> void:
 	if _env != null:
 		var fogv: float = float(_cur["fog"])
 		if rain_fog:
-			fogv = maxf(fogv, maxf(float(_cur["rain"]) * 0.4, maxf(float(_cur["snow"]) * 0.5, float(_cur["hail"]) * 0.3)))
+			fogv = maxf(fogv, maxf(float(_cur["rain"]) * 0.4, maxf(float(_cur["snow"]) * 0.5, float(_cur["hail"]) * 0.3)) * (1.0 - shine * 0.8))
 		if fogv > 0.01:
 			_env.fog_enabled = true
 			_env.fog_density = fogv * 0.011
@@ -574,7 +852,7 @@ func _update_dome(delta: float) -> void:
 	_dome.scale = Vector3.ONE * radius
 	_drift += Vector2(wind_direction.x, wind_direction.z) * (cloud_speed * (0.4 + wind_speed * 0.08)) * delta
 	_dome_mat.set_shader_parameter("coverage", cloud)
-	_dome_mat.set_shader_parameter("darkness", clampf(float(_cur["dark"]) * storm_darkness, 0.0, 1.0))
+	_dome_mat.set_shader_parameter("darkness", clampf(float(_cur["dark"]) * storm_darkness * lerpf(1.0, weather_dimming, 0.6), 0.0, 1.0))
 	_dome_mat.set_shader_parameter("light_level", _light_level)
 	_dome_mat.set_shader_parameter("drift", _drift)
 	_dome_mat.set_shader_parameter("flash", _flash)
@@ -1387,7 +1665,7 @@ func _update_trees(delta: float) -> void:
 	if trees == null or player == null:
 		return
 	_sway_timer += delta
-	if _sway_timer >= 0.05:
+	if _sway_timer >= 0.033:                    # about 30 updates a second; the motion itself is smoothed between them
 		_sway(_sway_timer)
 		_sway_timer = 0.0
 	_topple_timer += delta
@@ -1397,33 +1675,46 @@ func _update_trees(delta: float) -> void:
 		_topple_check(dt)
 
 
-func _sway(_dt: float) -> void:
+func _sway(dt: float) -> void:
 	if not ("_built" in trees) or not ("_cells" in trees):
 		return
-	var strength := clampf(wind_speed / 22.0, 0.0, 1.5) if tree_sway_degrees > 0.0 else 0.0
+	# The gusty wind speed is smoothed first, so the trees swell and ease with it instead of twitching.
+	var target := clampf(wind_speed / 18.0, 0.0, 1.6) if tree_sway_degrees > 0.0 else 0.0
+	_sway_smooth += (target - _sway_smooth) * (1.0 - exp(-dt * 1.6))
+	var strength := _sway_smooth
 	var built: Dictionary = trees._built
 	var cells: Dictionary = trees._cells
 	var pp := player.global_position
-	var range2 := tree_sway_distance * tree_sway_distance
-	# put back any cell that is out of range, or everything once the wind has dropped
-	for key in _swayed.keys():
-		var cc0: Vector3 = trees._cell_centre(key)
-		var dd := (cc0.x - pp.x) * (cc0.x - pp.x) + (cc0.z - pp.z) * (cc0.z - pp.z)
-		if strength < 0.1 or dd > range2 * 1.4 or not built.has(key):
-			if cells.has(key):
-				_set_cell_buffer(key, (cells[key] as Dictionary)["buf"])
-			_swayed.erase(key)
-	if strength < 0.1:
-		return
+	var range1 := tree_sway_distance
 	var amp := deg_to_rad(tree_sway_degrees) * strength
 	var wd := wind_direction
 	var side0 := Vector3(-wd.z, 0.0, wd.x)
+	var t_s := _t
+	# put back any cell that is out of range or no longer built, or everything once the wind has dropped
+	for key in _swayed.keys():
+		var cc0: Vector3 = trees._cell_centre(key)
+		var dd := Vector2(cc0.x - pp.x, cc0.z - pp.z).length()
+		if strength < 0.02 or dd > range1 * 1.15 or not built.has(key):
+			if cells.has(key):
+				_set_cell_buffer(key, (cells[key] as Dictionary)["buf"])
+			_swayed.erase(key)
+	if strength < 0.02:
+		return
 	for key in built:
 		var holder = built[key]
 		if holder == null or not is_instance_valid(holder) or not cells.has(key):
 			continue
 		var cc: Vector3 = trees._cell_centre(key)
-		if (cc.x - pp.x) * (cc.x - pp.x) + (cc.z - pp.z) * (cc.z - pp.z) > range2:
+		var dist := Vector2(cc.x - pp.x, cc.z - pp.z).length()
+		if dist > range1:
+			continue
+		# Trees near the edge of the range sway less and less, so none of them pop in or out.
+		var fade := 1.0 - smoothstep(range1 * 0.55, range1, dist)
+		var camp := amp * fade
+		if camp < 0.0015:
+			if _swayed.has(key) and cells.has(key):
+				_set_cell_buffer(key, (cells[key] as Dictionary)["buf"])
+				_swayed.erase(key)
 			continue
 		var d: Dictionary = cells[key]
 		var src: PackedFloat32Array = d["buf"]
@@ -1434,8 +1725,9 @@ func _sway(_dt: float) -> void:
 			if src[o + 5] == 0.0:
 				continue
 			var phase := (src[o + 3] + cc.x) * 0.21 + (src[o + 11] + cc.z) * 0.17
-			var a := amp * (0.55 + 0.45 * sin(_t * 1.6 + phase)) + amp * 0.25 * sin(_t * 4.3 + phase * 2.0)
-			var dirv := (wd + side0 * (0.35 * sin(_t * 2.2 + phase * 1.3))).normalized()
+			# a slow lean that swells and eases, a gentler faster flutter on top, and a slow side-to-side drift
+			var a := camp * (0.6 + 0.4 * sin(t_s * 1.2 + phase)) + camp * 0.18 * sin(t_s * 2.9 + phase * 2.0)
+			var dirv := (wd + side0 * (0.3 * sin(t_s * 1.7 + phase * 1.3))).normalized()
 			var r := Basis(Vector3.UP.cross(dirv).normalized(), a)
 			var bs := Basis(Vector3(src[o], src[o + 4], src[o + 8]), Vector3(src[o + 1], src[o + 5], src[o + 9]), Vector3(src[o + 2], src[o + 6], src[o + 10]))
 			var b2 := r * bs
@@ -1688,6 +1980,7 @@ func _spawn_tornado() -> void:
 	if current_weather != "tornado":
 		_apply_weather("tornado", true)
 		_weather_timer = maxf(_weather_timer, tornado_lifetime)
+		_manual_hold = maxf(_manual_hold, minf(tornado_lifetime, 60.0))
 
 
 func _update_tornado(delta: float) -> void:
